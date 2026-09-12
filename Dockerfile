@@ -3,7 +3,7 @@ FROM ghcr.io/pixlcore/xyops-shell-image:latest
 
 WORKDIR /app
 
-RUN pip3 install --no-cache-dir yt-dlp SignerPy==0.12.0
+RUN python3 -m pip install --no-cache-dir yt-dlp SignerPy==0.12.0
 
 COPY package*.json ./
 RUN npm install --omit=dev
