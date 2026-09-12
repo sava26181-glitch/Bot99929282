@@ -1,17 +1,23 @@
+# Этап 1: берём Node из официального образа
+FROM node:20-slim AS node
+
+# Этап 2: Python-образ
 FROM python:3.11-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Копируем Node и npm из первого этапа
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 
+# Создаём симлинк для npm/npx
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
+    ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx
+
+# Python-зависимости
 RUN python3 -m pip install --no-cache-dir yt-dlp SignerPy==0.12.0
 
-RUN curl -fsSL https://deb.nodesource.com/setup_19.x | bash - && \
-    apt-get install -y nodejs
-
+# Node-зависимости
 COPY package*.json ./
 RUN npm install --omit=dev
 
