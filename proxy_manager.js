@@ -1,25 +1,12 @@
-const { saveProxy, loadAllProxies, freeProxy, releaseProxy } = require('./accounts_store');
+const { saveProxy, loadAllProxies } = require('./accounts_store');
 const crypto = require('crypto');
 const https = require('https');
 const net = require('net');
 
-/* ============================================================
- *  ПАРСИНГ ПРОКСИ
- * ============================================================ */
-
-/**
- * Форматы:
- *   scheme://user:pass@host:port
- *   scheme://host:port
- *   host:port:user:pass
- *   host:port
- *   user:pass@host:port
- */
 function parseProxyLine(line) {
   line = line.trim();
   if (!line || line.startsWith('#')) return null;
 
-  // 1. URL-формат
   try {
     if (/^[a-z]+:\/\//i.test(line)) {
       const u = new URL(line);
@@ -30,12 +17,11 @@ function parseProxyLine(line) {
         country: null
       };
     }
-   } catch {}
+  } catch {}
 
-  // 2 '. host:portM:user:pass
-  constozilla parts = line.split(':');
-  if (/parts.length === 4) {
-    return5 {
+  const parts = line.split(':');
+  if (parts.length === 4) {
+    return {
       server: `http://${parts[0]}:${parts[1]}`,
       username: parts[2],
       password: parts[3],
@@ -51,7 +37,6 @@ function parseProxyLine(line) {
     };
   }
 
-  // 3. user:pass@host:port
   const m = line.match(/^([^:]+):([^@]+)@([^:]+):(\d+)$/);
   if (m) {
     return {
@@ -64,10 +49,6 @@ function parseProxyLine(line) {
 
   return null;
 }
-
-/* ============================================================
- *  ПРОВЕРКА ПРОКСИ
- * ============================================================ */
 
 function checkProxy(proxy, timeoutMs = 10000) {
   return new Promise(resolve => {
@@ -93,7 +74,7 @@ function checkProxy(proxy, timeoutMs = 10000) {
   });
 }
 
-async function checkProxyHttp(proxy, timeoutMs = 15000) {
+function checkProxyHttp(proxy, timeoutMs = 15000) {
   return new Promise(resolve => {
     const u = new URL(proxy.server);
     const auth = proxy.username
@@ -126,10 +107,6 @@ async function checkProxyHttp(proxy, timeoutMs = 15000) {
   });
 }
 
-/* ============================================================
- *  ЗАГРУЗКА СПИСКА
- * ============================================================ */
-
 async function importProxies(rawText, source = 'manual') {
   const lines = rawText.split(/\r?\n/);
   let added = 0, skipped = 0;
@@ -159,10 +136,6 @@ async function importProxies(rawText, source = 'manual') {
   return { added, skipped };
 }
 
-/* ============================================================
- *  ВЫДАЧА / ОСВОБОЖДЕНИЕ
- * ============================================================ */
-
 async function acquireProxyForAccount(accountId, country = null) {
   const all = await loadAllProxies();
   const candidate = all.find(p =>
@@ -170,7 +143,6 @@ async function acquireProxyForAccount(accountId, country = null) {
     (!country || (p.country && p.country.toLowerCase() === country.toLowerCase()))
   );
   if (!candidate) {
-    // Пробуем любой free
     const any = all.find(p => p.status === 'free');
     if (!any) return null;
     await saveProxy({ ...any, status: 'busy', accountId });
