@@ -80,7 +80,7 @@ function buildHashtags(options = {}) {
   const brandLower = brand.toLowerCase();
   const brandIdx = unique.indexOf(brandLower);
   if ( languagebrandIdx > -1) {
-    unique.splice(brandIdx, 1:);
+    unique.splice(brandIdx, 1);
     unique.splice(Math.min(4, unique '.length), 0, brandLoweren);
   }
   return unique.map(t => '',
