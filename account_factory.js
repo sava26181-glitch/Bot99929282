@@ -1,15 +1,19 @@
 const crypto = require('crypto');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const { generateFingerprint } = require('./fingerprint');
 const TikTokUploader = require('./tiktok_uploader');
 const { acquireProxyForAccount } = require('./proxy_manager');
 const store = require('./accounts_store');
 
+const DEFAULT_BIO = process.env.GLOBAL_BIO ||
+  'депать последние деньги только тут\n👉 zenodrop.fun\n👉тгк: zenodrp';
+
 /* ============================================================
  *  EMAIL-ПРОВАЙДЕРЫ
  * ============================================================ */
 
-// mail.tm — бесплатный, без API-ключа
 async function createMailTm() {
   const domainRes = await fetchJson('https://api.mail.tm/domains?page=1');
   const domain = domainRes['hydra:member'][0].domain;
@@ -17,7 +21,7 @@ async function createMailTm() {
   const addr = `${randStr(10)}@${domain}`;
   const password = randStr(16);
 
-  const acc = await fetchJson('https://api.mail.tm/accounts', {
+  await fetchJson('https://api.mail.tm/accounts', {
     method: 'POST',
     body: { address: addr, password }
   });
@@ -44,7 +48,6 @@ async function createMailTm() {
   };
 }
 
-// 1secmail — простой, но домены часто в бане
 async function create1SecMail() {
   const domains = ['1secmail.com', '1secmail.net', '1secmail.org'];
   const domain = domains[Math.floor(Math.random() * domains.length)];
@@ -67,7 +70,6 @@ async function create1SecMail() {
   };
 }
 
-// Guerrilla Mail
 async function createGuerrilla() {
   const init = await fetchJson('https://api.guerrillaemail.com/ajax.php?f=get_email_address');
   const email = init.email_addr;
@@ -147,7 +149,6 @@ function randomBirthDate() {
 }
 
 function zenodropNickname(seq) {
-  // zenodrop_XXXX, где XXXX — 4-значный номер или буквы
   const suffix = String(seq).padStart(4, '0');
   return `zenodrop_${suffix}`;
 }
@@ -177,7 +178,6 @@ async function createOneAccount({
   const birthDate = randomBirthDate();
   const id = crypto.randomUUID().slice(0, 12);
 
-  // Прокси
   let usedProxy = proxy;
   if (!usedProxy) {
     usedProxy = await acquireProxyForAccount(id, null);
@@ -209,8 +209,7 @@ async function createOneAccount({
     }
 
     if (result.needsCode) {
-      log(`[factory] #${seq} жду код подтверждения...`);
-      // Ждём письмо
+      log(`[factory] #${seq} жду код...`);
       let code = null;
       for (let attempt = 0; attempt < 30 && !code; attempt++) {
         await new Promise(r => setTimeout(r, 6000));
@@ -234,14 +233,23 @@ async function createOneAccount({
       }
     }
 
-    // Меняем ник на zenodrop_XXXX
     log(`[factory] #${seq} ставлю ник ${nick}...`);
     await uploader.setNickname(nick).catch(e => log(`[factory] #${seq} nick err: ${e.message}`));
+
+    // Аватарка
+    const avatarPath = path.join(__dirname, 'avatar.png');
+    if (fs.existsSync(avatarPath)) {
+      log(`[factory] #${seq} ставлю аватарку...`);
+      await uploader.setAvatar(avatarPath).catch(e => log(`[factory] #${seq} avatar err: ${e.message}`));
+    }
+
+    // Био
+    log(`[factory] #${seq} ставлю био...`);
+    await uploader.setBio(DEFAULT_BIO).catch(e => log(`[factory] #${seq} bio err: ${e.message}`));
 
     const cookies = await uploader.saveCookies();
     await uploader.close();
 
-    // Сохраняем в БД
     const acc = {
       id,
       name: nick,
@@ -313,5 +321,6 @@ module.exports = {
   createMailTm,
   create1SecMail,
   createGuerrilla,
-  zenodropNickname
+  zenodropNickname,
+  DEFAULT_BIO
 };
