@@ -9,16 +9,17 @@ const https = require("https");
 const TikTokUploader = require("./tiktok_uploader");
 const { buildHashtags, refreshTrending, BRAND_TAG } = require("./tiktok_uploader");
 const { TikTokWarmer } = require("./warmer");
+const { generateFingerprint } = require("./fingerprint");
+const proxyMgr = require("./proxy_manager");
+const factory = require("./account_factory");
+const store = require("./accounts_store");
 
 /* ============================================================
  *  КОНФИГ
  * ============================================================ */
 
 const TOKEN = process.env.BOT_TOKEN;
-if (!TOKEN) {
-  console.error("BOT_TOKEN is not set");
-  process.exit(1);
-}
+if (!TOKEN) { console.error("BOT_TOKEN is not set"); process.exit(1); }
 
 const DEFAULT_INSERT = Number(process.env.INSERT_AT_SECONDS || 5);
 const DEFAULT_DURATION = Number(process.env.BANNER_DURATION || 4);
@@ -31,29 +32,27 @@ const TMP = path.join(os.tmpdir(), "zenodrop-tiktok");
 fs.mkdirSync(TMP, { recursive: true });
 
 if (!fs.existsSync(BANNER)) {
-  console.error("banner.mp4 not found in project root");
+  console.error("banner.mp4 not found");
   process.exit(1);
 }
 
 const bot = new TelegramBot(TOKEN, { polling: true });
 const sessions = new Map();
 const accounts = new Map();
+const factoryJobs = new Map();
 
 /* ============================================================
- *  УТИЛИТЫ
+ *  УТИЛИТЫ (без изменений)
  * ============================================================ */
 
 function cleanup(...files) {
-  for (const f of files) {
-    try { if (f) fs.unlinkSync(f); } catch {}
-  }
+  for (const f of files) { try { if (f) fs.unlinkSync(f); } catch {} }
 }
 
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args);
-    let stderr = "";
-    let stdout = "";
+    let stderr = "", stdout = "";
     p.stdout?.on("data", d => stdout += d.toString());
     p.stderr?.on("data", d => stderr += d.toString());
     p.on("error", reject);
@@ -71,8 +70,7 @@ async function probe(file) {
       "-v", "error",
       "-show_entries",
       "format=duration:stream=index,codec_type,width,height,r_frame_rate,sample_rate,channel_layout,channels",
-      "-of", "json",
-      file
+      "-of", "json", file
     ]);
     let out = "", err = "";
     p.stdout.on("data", d => out += d.toString());
@@ -104,10 +102,7 @@ async function download(fileId, dest) {
   await new Promise((resolve, reject) => {
     const stream = fs.createWriteStream(dest);
     const req = https.get(url, res => {
-      if (res.statusCode !== 200) {
-        stream.close(); cleanup(dest);
-        return reject(new Error(`Telegram HTTP ${res.statusCode}`));
-      }
+      if (res.statusCode !== 200) { stream.close(); cleanup(dest); return reject(new Error(`Telegram HTTP ${res.statusCode}`)); }
       res.pipe(stream);
       stream.on("finish", () => stream.close(resolve));
     });
@@ -121,12 +116,8 @@ function isTikTokUrl(text) {
     return /(^|\.)tiktok\.com$/i.test(u.hostname) || /(^|\.)vm\.tiktok\.com$/i.test(u.hostname);
   } catch { return false; }
 }
-
 function isUrl(text) {
-  try {
-    const u = new URL(text.trim());
-    return u.protocol === "http:" || u.protocol === "https:";
-  } catch { return false; }
+  try { const u = new URL(text.trim()); return u.protocol === "http:" || u.protocol === "https:"; } catch { return false; }
 }
 
 function runCommand(cmd, args, label = cmd) {
@@ -147,22 +138,18 @@ function runCommand(cmd, args, label = cmd) {
 async function downloadTikTok(url, dest) {
   await runCommand("yt-dlp", [
     "--no-playlist", "--no-warnings", "--restrict-filenames",
-    "-f", "bv*+ba/b",
-    "--merge-output-format", "mp4",
-    "-o", dest,
-    url
+    "-f", "bv*+ba/b", "--merge-output-format", "mp4", "-o", dest, url
   ], "yt-dlp");
-
   if (!fs.existsSync(dest)) throw new Error("yt-dlp не создал видеофайл.");
   const size = fs.statSync(dest).size;
   if (size > MAX_MB * 1024 * 1024) {
     cleanup(dest);
-    throw new Error(`Скачанное видео слишком большое: ${(size / 1024 / 1024).toFixed(1)} МБ. Максимум ${MAX_MB} МБ.`);
+    throw new Error(`Слишком большое: ${(size / 1024 / 1024).toFixed(1)} МБ. Максимум ${MAX_MB} МБ.`);
   }
 }
 
 /* ============================================================
- *  БАННЕР-РЕНДЕР
+ *  БАННЕР-РЕНДЕР (тот же)
  * ============================================================ */
 
 async function renderVideo(input, output, insertAt, bannerDuration, count) {
@@ -174,13 +161,10 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
   const dur = Math.max(0.5, Math.min(60, Number(bannerDuration)));
   const n = Math.max(1, Math.min(3, Number(count)));
 
-  if (t <= 0.01) throw new Error("Для вставки в самое начало выбери секунду больше 0.");
-  if (t >= info.duration - 0.03) {
-    throw new Error(`Секунда вставки должна быть раньше конца видео (${info.duration.toFixed(2)} сек).`);
-  }
+  if (t <= 0.01) throw new Error("Секунда вставки должна быть > 0.");
+  if (t >= info.duration - 0.03) throw new Error(`Секунда должна быть < ${(info.duration - 0.03).toFixed(2)}`);
 
   const filterParts = [];
-
   filterParts.push(`[0:v]trim=start=0:end=${t},setpts=PTS-STARTPTS[pre]`);
   filterParts.push(
     `[0:v]trim=start=${t}:end=${Math.min(t + 0.04, info.duration)},setpts=PTS-STARTPTS,` +
@@ -219,12 +203,10 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
   if (info.hasAudio) {
     const sr = Number.isFinite(info.sampleRate) ? info.sampleRate : 48000;
     const layout = info.channelLayout || "stereo";
-
     filterParts.push(
       `[0:a]atrim=start=0:end=${t},asetpts=PTS-STARTPTS[apre]`,
       `[0:a]atrim=start=${t},asetpts=PTS-STARTPTS[apost]`
     );
-
     if (bannerInfo.hasAudio) {
       filterParts.push(
         `[1:a]atrim=start=0:duration=${dur},asetpts=PTS-STARTPTS,` +
@@ -233,28 +215,20 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
     } else {
       filterParts.push(`anullsrc=r=${sr}:cl=${layout},atrim=duration=${dur},asetpts=PTS-STARTPTS[abanner]`);
     }
-
     filterParts.push(`[apre][abanner][apost]concat=n=3:v=0:a=1[aout]`);
-
     args.push(
       "-filter_complex", filterParts.join(";"),
       "-map", "[vout]", "-map", "[aout]",
       "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
-      "-pix_fmt", "yuv420p",
-      "-c:a", "aac", "-b:a", "128k",
-      "-movflags", "+faststart",
-      "-threads", "0",
-      output
+      "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+      "-movflags", "+faststart", "-threads", "0", output
     );
   } else {
     args.push(
       "-filter_complex", filterParts.join(";"),
       "-map", "[vout]", "-an",
       "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
-      "-pix_fmt", "yuv420p",
-      "-movflags", "+faststart",
-      "-threads", "0",
-      output
+      "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-threads", "0", output
     );
   }
 
@@ -268,15 +242,8 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
 function settingsKeyboard() {
   return {
     inline_keyboard: [
-      [
-        { text: "⏱ Секунда", callback_data: "time" },
-        { text: "⏳ Длительность", callback_data: "duration" }
-      ],
-      [
-        { text: "🖼 1", callback_data: "count1" },
-        { text: "🖼 2", callback_data: "count2" },
-        { text: "🖼 3", callback_data: "count3" }
-      ],
+      [{ text: "⏱ Секунда", callback_data: "time" }, { text: "⏳ Длительность", callback_data: "duration" }],
+      [{ text: "🖼 1", callback_data: "count1" }, { text: "🖼 2", callback_data: "count2" }, { text: "🖼 3", callback_data: "count3" }],
       [{ text: "🚀 ОБРАБОТАТЬ БАННЕР", callback_data: "render" }]
     ]
   };
@@ -285,28 +252,23 @@ function settingsKeyboard() {
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "➕ Добавить аккаунт", callback_data: "add_account" }],
+      [{ text: "➕ Добавить аккаунт вручную", callback_data: "add_account" }],
+      [{ text: "🏭 Массовое создание", callback_data: "factory" }],
       [{ text: "📋 Список аккаунтов", callback_data: "list_accounts" }],
-      [{ text: "🔥 Прогреть аккаунт", callback_data: "warm" }],
-      [{ text: "🏷 Обновить тренды", callback_data: "refresh_trends" }],
+      [{ text: "🔥 Прогреть все", callback_data: "warm_all" }],
+      [{ text: "🌐 Прокси", callback_data: "proxies" }],
+      [{ text: "🏷 Сменить ник", callback_data: "change_nick" }],
       [{ text: "📊 Статус", callback_data: "status" }]
     ]
   };
 }
 
-function accountsKeyboard(prefix, filterFn = () => true) {
+function accountsKeyboard(prefix) {
   const rows = [];
   for (const [id, acc] of accounts) {
-    if (!filterFn(acc)) continue;
     rows.push([
-      {
-        text: `${prefix} ${acc.name} (${acc.status})`,
-        callback_data: `${prefix === "📤" ? "post_" : "warm_"}${id}`
-      },
-      {
-        text: "🏷",
-        callback_data: `preview_tags_${id}`
-      }
+      { text: `${prefix} ${acc.name} (${acc.status})`, callback_data: `${prefix === "📤" ? "post_" : "warm_"}${id}` },
+      { text: "🏷", callback_data: `preview_tags_${id}` }
     ]);
   }
   return { inline_keyboard: rows };
@@ -316,31 +278,53 @@ function showSettings(chatId) {
   const s = sessions.get(chatId);
   return bot.sendMessage(
     chatId,
-    `⚙️ Настройки баннера\n\n` +
-    `⏱ Вставка: ${s.insertAt} сек.\n` +
-    `⏳ Баннер: ${s.duration} сек.\n` +
-    `🖼 Баннеров одновременно: ${s.count}\n\n` +
-    `Выбери параметры и жми «ОБРАБОТАТЬ».`,
+    `⚙️ Настройки баннера\n\n⏱ Вставка: ${s.insertAt} сек.\n⏳ Баннер: ${s.duration} сек.\n🖼 Баннеров: ${s.count}`,
     { reply_markup: settingsKeyboard() }
   );
 }
+
+/* ============================================================
+ *  ИНИЦИАЛИЗАЦИЯ
+ * ============================================================ */
+
+(async () => {
+  store.initDB();
+  await store.migrate();
+
+  // Загружаем аккаунты в память
+  try {
+    const list = await store.loadAllAccounts();
+    for (const a of list) {
+      a.uploader = new TikTokUploader({
+        proxy: a.proxy,
+        fingerprint: a.fingerprint,
+        cookies: a.cookies,
+        accountId: a.id,
+        headless: HEADLESS,
+        onCookies: async (cks) => { await store.saveCookies(a.id, cks); }
+      });
+      accounts.set(a.id, a);
+    }
+    console.log(`[init] loaded ${accounts.size} accounts`);
+  } catch (e) {
+    console.error('[init] load accounts error:', e.message);
+  }
+
+  refreshTrending().catch(() => {});
+  setInterval(() => refreshTrending().catch(() => {}), 24 * 60 * 60 * 1000);
+})();
 
 /* ============================================================
  *  КОМАНДЫ
  * ============================================================ */
 
 bot.onText(/^\/start$/, msg => {
-  bot.sendMessage(
-    msg.chat.id,
-    "🎬 *Zenodrop TikTok Bot v4*\n\n" +
-    "1. Пришли видео (файлом) или ссылку TikTok.\n" +
-    "2. Настрой вставку баннера.\n" +
-    "3. Выбери аккаунт — бот прогреет его и зальёт готовое видео с хештегами.\n\n" +
-    "Команды:\n" +
-    "/menu — меню аккаунтов\n" +
-    "Для добавления аккаунта: отправь `login:password:name:tag1,tag2`",
-    { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
-  );
+  bot.sendMessage(msg.chat.id,
+    "🤖 *Zenodrop TikTok Farm v5*\n\n" +
+    "• /menu — меню\n" +
+    "• Отправь видео или ссылку TikTok — обработка\n" +
+    "• Отправь `login:password:name:tag1,tag2` — добавить аккаунт вручную",
+    { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
 });
 
 bot.onText(/^\/menu$/, msg => {
@@ -354,10 +338,7 @@ bot.onText(/^\/menu$/, msg => {
 bot.on("video", async msg => {
   const chatId = msg.chat.id;
   const size = Number(msg.video.file_size || 0);
-
-  if (size && size > MAX_MB * 1024 * 1024) {
-    return bot.sendMessage(chatId, `❌ Максимальный размер видео: ${MAX_MB} МБ.`);
-  }
+  if (size && size > MAX_MB * 1024 * 1024) return bot.sendMessage(chatId, `❌ Максимум ${MAX_MB} МБ.`);
 
   const input = path.join(TMP, `${crypto.randomUUID()}_input.mp4`);
   try {
@@ -366,9 +347,7 @@ bot.on("video", async msg => {
     const info = await probe(input);
 
     const old = sessions.get(chatId);
-    if (old) {
-      cleanup(old.input, old.rendered);
-    }
+    if (old) cleanup(old.input, old.rendered);
 
     sessions.set(chatId, {
       input,
@@ -380,17 +359,16 @@ bot.on("video", async msg => {
       caption: msg.caption || "",
       rendered: null
     });
-
     await showSettings(chatId);
   } catch (e) {
-    console.error("DOWNLOAD/PROBE ERROR:", e);
+    console.error(e);
     cleanup(input);
     bot.sendMessage(chatId, "❌ Не удалось получить видео.");
   }
 });
 
 /* ============================================================
- *  ТЕКСТОВЫЕ СООБЩЕНИЯ
+ *  ТЕКСТ
  * ============================================================ */
 
 bot.on("message", async msg => {
@@ -398,93 +376,91 @@ bot.on("message", async msg => {
   const text = (msg.text || "").trim();
   if (!text || text.startsWith("/")) return;
 
-  // TikTok URL
+  // Состояния диалога
+  const job = factoryJobs.get(chatId);
+  if (job && job.waiting) {
+    if (job.waiting === "count") {
+      const n = Number(text);
+      if (!Number.isFinite(n) || n < 1 || n > 100) return bot.sendMessage(chatId, "❌ Введи число 1..100");
+      job.count = n;
+      job.waiting = "niche";
+      return bot.sendMessage(chatId, "📝 Введи нишу через запятую (или `-` чтобы пропустить):");
+    }
+    if (job.waiting === "niche") {
+      job.niche = text === "-" ? null : text.split(',').map(s => s.trim().toLowerCase());
+      job.waiting = null;
+      return startFactory(chatId, job);
+    }
+  }
+
   if (isTikTokUrl(text)) {
     const input = path.join(TMP, `${crypto.randomUUID()}_tiktok.mp4`);
     try {
       const old = sessions.get(chatId);
       if (old) cleanup(old.input, old.rendered);
-
       await bot.sendMessage(chatId, "⬇️ Скачиваю TikTok...");
       await downloadTikTok(text, input);
       const info = await probe(input);
-
       sessions.set(chatId, {
         input,
         insertAt: Math.min(DEFAULT_INSERT, Math.max(0.1, info.duration - 0.1)),
-        duration: DEFAULT_DURATION,
-        count: 1,
-        waiting: null,
-        videoDuration: info.duration,
-        caption: "",
-        rendered: null
+        duration: DEFAULT_DURATION, count: 1, waiting: null,
+        videoDuration: info.duration, caption: "", rendered: null
       });
-
       await showSettings(chatId);
     } catch (e) {
       cleanup(input);
-      await bot.sendMessage(chatId, `❌ Не удалось скачать TikTok.\n\n${String(e.message || e).slice(0, 1200)}`);
+      await bot.sendMessage(chatId, `❌ ${String(e.message).slice(0, 800)}`);
     }
     return;
   }
 
-  if (isUrl(text)) {
-    return bot.sendMessage(chatId, "❌ Поддерживаются только ссылки на TikTok.");
-  }
+  if (isUrl(text)) return bot.sendMessage(chatId, "❌ Только TikTok ссылки.");
 
-  const s = sessions.get(chatId);
-
-  // Добавление аккаунта
+  // Добавление аккаунта вручную
   const accMatch = text.match(/^([^:]+):([^:]+):([^:]+)(?::(.+))?$/);
-  if (!s && accMatch) {
+  if (accMatch && !sessions.get(chatId)) {
     const [, login, password, name, nicheStr] = accMatch;
-    const id = crypto.randomUUID().slice(0, 8);
-    accounts.set(id, {
-      id,
-      name: name.trim(),
-      login: login.trim(),
-      password: password.trim(),
-      niche: nicheStr
-        ? nicheStr.split(',').map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean)
-        : null,
-      status: "new",
-      uploader: new TikTokUploader({
-        cookiesPath: path.join(ROOT, `cookies_${id}.json`),
-        headless: HEADLESS
-      })
+    const id = crypto.randomUUID().slice(0, 12);
+    const fingerprint = generateFingerprint(id);
+    const proxy = await proxyMgr.acquireProxyForAccount(id, null);
+    const acc = {
+      id, name: name.trim(), login: login.trim(), password: password.trim(),
+      niche: nicheStr ? nicheStr.split(',').map(s => s.trim().toLowerCase()) : null,
+      proxy, fingerprint, cookies: null, status: "new", postsCount: 0
+    };
+    acc.uploader = new TikTokUploader({
+      proxy, fingerprint, accountId: id, headless: HEADLESS,
+      onCookies: async (cks) => { await store.saveCookies(id, cks); }
     });
+    accounts.set(id, acc);
+    await store.saveAccount(acc);
     return bot.sendMessage(chatId,
-      `✅ Аккаунт "${name.trim()}" добавлен.\nID: \`${id}\`\n` +
-      (nicheStr ? `Ниша: ${nicheStr}` : `Ниша: общая`),
-      { parse_mode: "Markdown" }
-    );
+      `✅ Аккаунт "${acc.name}" добавлен.\nID: \`${id}\`\nПрокси: ${proxy ? proxy.server : 'нет (free)'}`,
+      { parse_mode: "Markdown" });
   }
 
+  // Остальные состояния
+  const s = sessions.get(chatId);
   if (!s) return;
 
   if (s.waiting === "time") {
-    const value = Number(msg.text.replace(",", "."));
-    if (!Number.isFinite(value) || value < 0 || value >= s.videoDuration - 0.03) {
-      return bot.sendMessage(chatId, `❌ Введи секунду от 0 до ${(s.videoDuration - 0.03).toFixed(2)}.`);
-    }
-    s.insertAt = value;
-    s.waiting = null;
+    const v = Number(text.replace(",", "."));
+    if (!Number.isFinite(v) || v < 0 || v >= s.videoDuration - 0.03)
+      return bot.sendMessage(chatId, `❌ 0..${(s.videoDuration - 0.03).toFixed(2)}`);
+    s.insertAt = v; s.waiting = null;
     return showSettings(chatId);
   }
-
   if (s.waiting === "duration") {
-    const value = Number(msg.text.replace(",", "."));
-    if (!Number.isFinite(value) || value < 0.5 || value > 60) {
-      return bot.sendMessage(chatId, "❌ От 0.5 до 60 секунд.");
-    }
-    s.duration = value;
-    s.waiting = null;
+    const v = Number(text.replace(",", "."));
+    if (!Number.isFinite(v) || v < 0.5 || v > 60) return bot.sendMessage(chatId, "❌ 0.5..60");
+    s.duration = v; s.waiting = null;
     return showSettings(chatId);
   }
 });
 
 /* ============================================================
- *  CALLBACK QUERY
+ *  CALLBACK
  * ============================================================ */
 
 bot.on("callback_query", async q => {
@@ -492,231 +468,389 @@ bot.on("callback_query", async q => {
   const s = sessions.get(chatId);
   const data = q.data;
 
-  /* --- МЕНЮ АККАУНТОВ --- */
+  /* --- МЕНЮ --- */
   if (data === "add_account") {
     await bot.answerCallbackQuery(q.id);
     return bot.sendMessage(chatId,
-      "➕ Отправь: `login:password:name:tag1,tag2,tag3`\n\n" +
-      "Пример:\n`user@mail.com:pass123:myacc:dropshipping,ecommerce,money`\n\n" +
-      "Последняя часть (ниша) — опционально.",
-      { parse_mode: "Markdown" }
-    );
+      "➕ `login:password:name:tag1,tag2`\n\nПример:\n`user@mail.com:pass123:myacc:dropshipping,ecommerce`",
+      { parse_mode: "Markdown" });
   }
 
   if (data === "list_accounts") {
     await bot.answerCallbackQuery(q.id);
-    if (accounts.size === 0) return bot.sendMessage(chatId, "📋 Нет аккаунтов.");
-    let text = "📋 *Аккаунты:*\n\n";
+    if (accounts.size === 0) return bot.sendMessage(chatId, "📋 Пусто.");
+    let txt = `📋 *Аккаунты (${accounts.size}):*\n\n`;
+    let i = 1;
     for (const [id, acc] of accounts) {
-      text += `• *${acc.name}* (\`${id}\`)\n`;
-      text += `  Статус: ${acc.status}\n`;
-      text += `  Login: ${acc.login}\n`;
-      if (acc.niche) text += `  Ниша: ${acc.niche.join(', ')}\n`;
-      text += `\n`;
+      txt += `${i++}. *${acc.name}* (\`${id}\`)\n`;
+      txt += `   ${acc.login} | ${acc.status}\n`;
+      if (acc.proxy) txt += `   🌐 ${acc.proxy.server}\n`;
+      if (acc.niche) txt += `   🏷 ${acc.niche.join(', ')}\n`;
+      txt += `\n`;
+      if (i > 30) { txt += `... и ещё ${accounts.size - 30}\n`; break; }
     }
-    return bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, txt, { parse_mode: "Markdown" });
   }
 
   if (data === "status") {
     await bot.answerCallbackQuery(q.id);
-    let text = `📊 *Статус*\n\nАккаунтов: ${accounts.size}\nСессий: ${sessions.size}\n\n`;
-    for (const [id, acc] of accounts) text += `• ${acc.name}: ${acc.status}\n`;
-    return bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+    const proxies = await store.loadAllProxies();
+    const free = proxies.filter(p => p.status === 'free').length;
+    const busy = proxies.filter(p => p.status === 'busy').length;
+    let txt = `📊 *Статус*\n\nАккаунтов: ${accounts.size}\nСессий: ${sessions.size}\n\n`;
+    txt += `Прокси: всего ${proxies.length}\n🟢 free: ${free}\n🔴 busy: ${busy}\n\n`;
+    const stats = {};
+    for (const acc of accounts.values()) stats[acc.status] = (stats[acc.status] || 0) + 1;
+    for (const [st, cnt] of Object.entries(stats)) txt += `${st}: ${cnt}\n`;
+    return bot.sendMessage(chatId, txt, { parse_mode: "Markdown" });
   }
 
-  if (data === "refresh_trends") {
-    await bot.answerCallbackQuery(q.id, { text: "Обновляю..." });
-    try {
-      const tags = await refreshTrending();
-      return bot.sendMessage(chatId, `🔥 Тренды обновлены: ${tags.length} тегов\n\n${tags.slice(0, 15).join(' ')}`);
-    } catch (e) {
-      return bot.sendMessage(chatId, `❌ Ошибка: ${e.message}`);
+  /* --- ФАБРИКА --- */
+  if (data === "factory") {
+    await bot.answerCallbackQuery(q.id);
+    factoryJobs.set(chatId, { waiting: "count" });
+    return bot.sendMessage(chatId,
+      "🏭 *Массовое создание аккаунтов*\n\nСколько аккаунтов создать? (1..100)\n\n" +
+      "⚠️ Требуется свободный пул прокси и почтовый провайдер.",
+      { parse_mode: "Markdown" });
+  }
+
+  /* --- ПРОКСИ --- */
+  if (data === "proxies") {
+    await bot.answerCallbackQuery(q.id);
+    const list = await store.loadAllProxies();
+    const free = list.filter(p => p.status === 'free').length;
+    const busy = list.filter(p => p.status === 'busy').length;
+    return bot.sendMessage(chatId,
+      `🌐 *Прокси*\n\nВсего: ${list.length}\n🟢 free: ${free}\n🔴 busy: ${busy}\n\n` +
+      `Отправь список прокси одним сообщением, каждый с новой строки:\n\n` +
+      "`scheme://user:pass@host:port`\n`host:port:user:pass`\n`host:port`",
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "📥 Проверить все", callback_data: "proxy_check" }],
+            [{ text: "🗑 Очистить", callback_data: "proxy_clear" }]
+          ]
+        }
+      });
+  }
+
+  if (data === "proxy_check") {
+    await bot.answerCallbackQuery(q.id);
+    const list = await store.loadAllProxies();
+    await bot.sendMessage(chatId, `🔍 Проверяю ${list.length} прокси...`);
+    let ok = 0, fail = 0;
+    for (const p of list) {
+      const r = await proxyMgr.checkProxy(p);
+      if (r.ok) ok++;
+      else {
+        fail++;
+        await store.saveProxy({ ...p, status: 'dead' });
+      }
     }
+    return bot.sendMessage(chatId, `✅ Живых: ${ok}\n❌ Мёртвых: ${fail}`);
   }
 
-  /* --- ПРОГРЕВ --- */
-  if (data === "warm") {
+  if (data === "proxy_clear") {
+    await bot.answerCallbackQuery(q.id);
+    return bot.sendMessage(chatId, "⚠️ Очистка не реализована — удаляй строки напрямую в БД.");
+  }
+
+  /* --- СМЕНА НИКА --- */
+  if (data === "change_nick") {
     await bot.answerCallbackQuery(q.id);
     if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
-    return bot.sendMessage(chatId, "🔥 Выбери аккаунт для прогрева:", {
-      reply_markup: accountsKeyboard("🔥")
-    });
+    const rows = [];
+    for (const [id, acc] of accounts) {
+      rows.push([{ text: `🏷 ${acc.name}`, callback_data: `nick_${id}` }]);
+    }
+    return bot.sendMessage(chatId, "🏷 Выбери аккаунт:", { reply_markup: { inline_keyboard: rows } });
   }
 
-  if (data.startsWith("warm_")) {
-    const accId = data.slice(5);
+  if (data.startsWith("nick_")) {
+    const id = data.slice(5);
     await bot.answerCallbackQuery(q.id);
-    return startWarm(chatId, accId);
+    accounts.forEach(a => a.__waitNick = false);
+    const acc = accounts.get(id);
+    if (acc) acc.__waitNick = true;
+    return bot.sendMessage(chatId,
+      `🏷 Введи новый ник для *${acc?.name}*:\n\n` +
+      `Рекомендую формат: \`zenodrop_XXXX\`\n\nОтправь ник одним сообщением.`,
+      { parse_mode: "Markdown" });
+  }
+
+  /* --- ПРОГРЕВ ВСЕХ --- */
+  if (data === "warm_all") {
+    await bot.answerCallbackQuery(q.id);
+    return startWarmAll(chatId);
+  }
+
+  /* --- ПРОГРЕВ ОДНОГО --- */
+  if (data.startsWith("warm_")) {
+    const id = data.slice(5);
+    await bot.answerCallbackQuery(q.id);
+    return startWarm(chatId, id);
   }
 
   /* --- ПРЕВЬЮ ХЕШТЕГОВ --- */
   if (data.startsWith("preview_tags_")) {
-    const accId = data.slice("preview_tags_".length);
+    const id = data.slice("preview_tags_".length);
     await bot.answerCallbackQuery(q.id);
-    const acc = accounts.get(accId);
-    if (!acc) return bot.sendMessage(chatId, "❌ Аккаунт не найден.");
-
-    const tags = buildHashtags({
-      niche: acc.niche || undefined,
-      extra: acc.extraTags || []
-    });
-
-    return bot.sendMessage(chatId,
-      `🏷 *Хештеги для ${acc.name}:*\n\n${tags.join(' ')}\n\nВсего: ${tags.length}`,
-      { parse_mode: "Markdown" }
-    );
+    const acc = accounts.get(id);
+    if (!acc) return bot.sendMessage(chatId, "❌ Нет.");
+    const tags = buildHashtags({ niche: acc.niche || undefined });
+    return bot.sendMessage(chatId, `🏷 *${acc.name}*\n\n${tags.join(' ')}\n\nВсего: ${tags.length}`, { parse_mode: "Markdown" });
   }
 
-  /* --- НАСТРОЙКИ БАННЕРА --- */
-  if (!s) {
-    return bot.answerCallbackQuery(q.id, { text: "Сначала отправь видео." });
-  }
+  /* --- БАННЕР --- */
+  if (!s) return bot.answerCallbackQuery(q.id, { text: "Сначала видео." });
 
   if (data === "time") {
     s.waiting = "time";
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId, "⏱ На какой секунде вставить баннер?\nНапример: 7");
+    return bot.sendMessage(chatId, "⏱ На какой секунде вставить баннер?");
   }
-
   if (data === "duration") {
     s.waiting = "duration";
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId, "⏳ Сколько секунд показывать баннер?\nНапример: 4");
+    return bot.sendMessage(chatId, "⏳ Длительность баннера в секундах?");
   }
-
   if (/^count[123]$/.test(data)) {
     s.count = Number(data.slice(-1));
-    await bot.answerCallbackQuery(q.id, { text: `Выбрано: ${s.count}` });
+    await bot.answerCallbackQuery(q.id, { text: `Баннеров: ${s.count}` });
     return showSettings(chatId);
   }
 
-  /* --- РЕНДЕР --- */
   if (data === "render") {
     await bot.answerCallbackQuery(q.id);
     const output = path.join(TMP, `${crypto.randomUUID()}_rendered.mp4`);
-
     try {
       await bot.sendMessage(chatId, "🎬 Вставляю баннер...");
       await renderVideo(s.input, output, s.insertAt, s.duration, s.count);
       s.rendered = output;
-
-      await bot.sendVideo(chatId, output, {
-        caption: "✅ Баннер вставлен. Теперь выбери аккаунт для загрузки.",
-        supports_streaming: true
-      });
-
-      if (accounts.size === 0) {
-        return bot.sendMessage(chatId, "❌ Нет аккаунтов. Добавь: /menu → ➕");
-      }
-
-      await bot.sendMessage(chatId, "📤 Куда заливаем?", {
-        reply_markup: accountsKeyboard("📤")
-      });
+      await bot.sendVideo(chatId, output, { caption: "✅ Готово", supports_streaming: true });
+      if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
+      await bot.sendMessage(chatId, "📤 Куда заливаем?", { reply_markup: accountsKeyboard("📤") });
     } catch (e) {
-      console.error("=== FFMPEG ERROR ===", e);
-      await bot.sendMessage(chatId, `❌ Ошибка FFmpeg:\n\n${String(e.message || e).slice(0, 1200)}`);
+      console.error(e);
+      await bot.sendMessage(chatId, `❌ ${String(e.message).slice(0, 1000)}`);
     }
     return;
   }
 
-  /* --- ЗАЛИВ В TIKTOK --- */
   if (data.startsWith("post_")) {
-    const accId = data.slice(5);
+    const id = data.slice(5);
     await bot.answerCallbackQuery(q.id);
-    if (!s?.rendered) {
-      return bot.sendMessage(chatId, "❌ Сначала обработай баннер.");
-    }
-    return startPost(chatId, accId, s);
+    if (!s?.rendered) return bot.sendMessage(chatId, "❌ Сначала баннер.");
+    return startPost(chatId, id, s);
   }
 });
 
 /* ============================================================
- *  ПРОГРЕВ + ПОСТИНГ
+ *  СМЕНА НИКА — текстовый обработчик
  * ============================================================ */
 
-async function startWarm(chatId, accountId) {
-  const acc = accounts.get(accountId);
-  if (!acc) return bot.sendMessage(chatId, "❌ Аккаунт не найден.");
+bot.on("message", async msg => {
+  const chatId = msg.chat.id;
+  const text = (msg.text || "").trim();
+  if (!text) return;
+  for (const [id, acc] of accounts) {
+    if (acc.__waitNick) {
+      acc.__waitNick = false;
+      await bot.sendMessage(chatId, `🏷 Меняю ник на "${text}"...`);
+      try {
+        await acc.uploader.init();
+        const r = await acc.uploader.setNickname(text);
+        if (r.success) {
+          acc.name = text;
+          await store.saveAccount(acc);
+          await bot.sendMessage(chatId, `✅ Ник изменён на "${text}"`);
+        } else {
+          await bot.sendMessage(chatId, `❌ ${r.error || 'не удалось'}`);
+        }
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ ${e.message}`);
+      } finally {
+        await acc.uploader.close();
+      }
+      return;
+    }
+  }
+});
+
+/* ============================================================
+ *  ПРОКСИ — импорт из сообщения
+ * ============================================================ */
+
+bot.on("message", async msg => {
+  const chatId = msg.chat.id;
+  const text = (msg.text || '').trim();
+  if (!text) return;
+
+  // Эвристика: если много строк, и в них есть "://" или ":" с портом — это прокси
+  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (lines.length >= 2) {
+    const looksLikeProxy = lines.every(l =>
+      /^[a-z]+:\/\//i.test(l) ||
+      /^\d{1,3}(\.\d{1,3}){3}:\d+/.test(l) ||
+      /^[^\s:]+:\d+:[^\s:]+:[^\s:]+$/.test(l) ||
+      /^[^\s@]+:[^\s@]+@[^\s:]+:\d+$/.test(l)
+    );
+    if (looksLikeProxy) {
+      await bot.sendMessage(chatId, `🌐 Импортирую ${lines.length} строк...`);
+      const r = await proxyMgr.importProxies(text, 'telegram');
+      return bot.sendMessage(chatId, `✅ Добавлено: ${r.added}\n⏭ Пропущено: ${r.skipped}`);
+    }
+  }
+});
+
+/* ============================================================
+ *  ФАБРИКА
+ * ============================================================ */
+
+async function startFactory(chatId, job) {
+  const { count, niche } = job;
+  factoryJobs.delete(chatId);
+
+  await bot.sendMessage(chatId,
+    `🏭 Запускаю создание ${count} аккаунтов...\nНиша: ${niche ? niche.join(', ') : 'общая'}`);
+
+  const created = [];
+  try {
+    const r = await factory.createBatch({
+      count,
+      emailProvider: 'mail.tm',
+      niche,
+      startSeq: 1,
+      concurrency: 2,
+      log: (m) => console.log(m),
+      onProgress: async ({ done, total, last }) => {
+        if (done % 5 === 0 || done === total) {
+          await bot.sendMessage(chatId, `⏳ ${done}/${total} (последний: ${last.success ? '✅' : '❌ ' + last.reason})`).catch(() => {});
+        }
+      }
+    });
+
+    // Загружаем созданные в память
+    for (const acc of r.ok) {
+      acc.uploader = new TikTokUploader({
+        proxy: acc.proxy,
+        fingerprint: acc.fingerprint,
+        cookies: acc.cookies,
+        accountId: acc.id,
+        headless: HEADLESS,
+        onCookies: async (cks) => { await store.saveCookies(acc.id, cks); }
+      });
+      accounts.set(acc.id, acc);
+    }
+
+    await bot.sendMessage(chatId,
+      `✅ Создано: ${r.ok.length}\n❌ Ошибок: ${r.fail.length}\n\n` +
+      (r.fail.length ? `Причины:\n${r.fail.slice(0, 10).map(f => `#${f.seq}: ${f.reason}`).join('\n')}` : ''));
+  } catch (e) {
+    console.error(e);
+    await bot.sendMessage(chatId, `❌ Фабрика упала: ${e.message}`);
+  }
+}
+
+/* ============================================================
+ *  ПРОГРЕВ
+ * ============================================================ */
+
+async function startWarm(chatId, id) {
+  const acc = accounts.get(id);
+  if (!acc) return bot.sendMessage(chatId, "❌ Нет аккаунта.");
 
   acc.status = "warming";
-  await bot.sendMessage(chatId, `🔥 Начинаю прогрев ${acc.name}...`);
+  await store.updateStatus(id, "warming");
+  await bot.sendMessage(chatId, `🔥 Прогрев ${acc.name}...`);
 
   try {
     await acc.uploader.init();
-
-    if (!fs.existsSync(acc.uploader.cookiesPath)) {
-      const result = await acc.uploader.login(acc.login, acc.password);
-      if (result.captcha) {
+    if (!acc.cookies) {
+      const r = await acc.uploader.login(acc.login, acc.password);
+      if (r.captcha) {
         acc.status = "captcha";
-        return bot.sendMessage(chatId,
-          `⚠️ Капча при логине ${acc.name}.\nОткрой Render Shell и реши вручную.`
-        );
+        await store.updateStatus(id, "captcha");
+        return bot.sendMessage(chatId, `⚠️ Капча у ${acc.name}`);
       }
     }
-
     const warmer = new TikTokWarmer(acc.uploader);
     await warmer.warmAccount(3, 20);
 
     acc.status = "warmed";
-    await bot.sendMessage(chatId, `✅ Прогрев ${acc.name} завершён!`);
+    await store.updateStatus(id, "warmed");
+    await bot.sendMessage(chatId, `✅ ${acc.name} прогрет!`);
   } catch (e) {
-    console.error("warm error:", e);
     acc.status = "error";
-    await bot.sendMessage(chatId, `❌ Ошибка прогрева ${acc.name}:\n${e.message}`);
+    await store.updateStatus(id, "error");
+    await bot.sendMessage(chatId, `❌ ${acc.name}: ${e.message}`);
   } finally {
     await acc.uploader.close();
   }
 }
 
-async function startPost(chatId, accountId, session) {
-  const acc = accounts.get(accountId);
-  if (!acc) return bot.sendMessage(chatId, "❌ Аккаунт не найден.");
+async function startWarmAll(chatId) {
+  if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
+  await bot.sendMessage(chatId, `🔥 Прогреваю ${accounts.size} аккаунтов последовательно...`);
+  let done = 0;
+  for (const [id, acc] of accounts) {
+    if (acc.status === 'warming') continue;
+    try {
+      await startWarm(chatId, id);
+    } catch {}
+    done++;
+    if (done % 5 === 0) {
+      await bot.sendMessage(chatId, `⏳ ${done}/${accounts.size}`).catch(() => {});
+    }
+    // Пауза между аккаунтами, чтобы не спалить сеть
+    await new Promise(r => setTimeout(r, 30_000));
+  }
+  await bot.sendMessage(chatId, `✅ Прогрев завершён: ${done}`);
+}
+
+/* ============================================================
+ *  ПОСТИНГ
+ * ============================================================ */
+
+async function startPost(chatId, id, session) {
+  const acc = accounts.get(id);
+  if (!acc) return bot.sendMessage(chatId, "❌ Нет аккаунта.");
 
   acc.status = "posting";
-  await bot.sendMessage(chatId, `📤 Логинюсь и заливаю в ${acc.name}...`);
+  await store.updateStatus(id, "posting");
+  await bot.sendMessage(chatId, `📤 Заливаю в ${acc.name}...`);
 
   try {
     await acc.uploader.init();
-
-    if (!fs.existsSync(acc.uploader.cookiesPath)) {
-      const result = await acc.uploader.login(acc.login, acc.password);
-      if (result.captcha) {
+    if (!acc.cookies) {
+      const r = await acc.uploader.login(acc.login, acc.password);
+      if (r.captcha) {
         acc.status = "captcha";
-        return bot.sendMessage(chatId, `⚠️ Капча. Реши вручную.`);
+        await store.updateStatus(id, "captcha");
+        return bot.sendMessage(chatId, `⚠️ Капча.`);
       }
     }
 
-    // Немного прогрева перед постом
     const warmer = new TikTokWarmer(acc.uploader);
     await warmer.randomScroll(60);
 
-    // Хештеги
-    const hashtags = buildHashtags({
-      niche: acc.niche || undefined,
-      extra: acc.extraTags || []
-    });
+    const hashtags = buildHashtags({ niche: acc.niche || undefined });
+    await bot.sendMessage(chatId, `🏷 ${hashtags.join(' ')}`);
 
     const caption = session.caption || "Check this out 🔥";
-
-    await bot.sendMessage(
-      chatId,
-      `🏷 *Хештеги для ${acc.name}:*\n${hashtags.join(' ')}`,
-      { parse_mode: "Markdown" }
-    );
-
-    const result = await acc.uploader.uploadVideo(session.rendered, caption, {
-      hashtags
-    });
+    const r = await acc.uploader.uploadVideo(session.rendered, caption, { hashtags });
 
     acc.status = "posted";
-    await bot.sendMessage(chatId,
-      `✅ Залито в ${acc.name}!\n${result.url || ''}\n\n` +
-      `Хештеги: ${result.hashtags.join(' ')}`
-    );
+    acc.postsCount = (acc.postsCount || 0) + 1;
+    await store.updateStatus(id, "posted");
+    await store.markPosted(id);
+    await bot.sendMessage(chatId, `✅ ${acc.name} → ${r.url || 'OK'}`);
   } catch (e) {
-    console.error("post error:", e);
     acc.status = "error";
-    await bot.sendMessage(chatId, `❌ Ошибка заливки ${acc.name}:\n${String(e.message || e).slice(0, 1000)}`);
+    await store.updateStatus(id, "error");
+    await bot.sendMessage(chatId, `❌ ${acc.name}: ${String(e.message).slice(0, 500)}`);
   } finally {
     await acc.uploader.close();
     if (session.input) cleanup(session.input);
@@ -729,12 +863,5 @@ async function startPost(chatId, accountId, session) {
  *  СТАРТ
  * ============================================================ */
 
-bot.on("polling_error", err => {
-  console.error("TELEGRAM POLLING ERROR:", err?.message || err);
-});
-
-// Раз в сутки — обновление трендов
-refreshTrending().catch(() => {});
-setInterval(() => refreshTrending().catch(() => {}), 24 * 60 * 60 * 1000);
-
-console.log("Zenodrop TikTok Bot v4 started.");
+bot.on("polling_error", err => console.error("POLLING:", err?.message || err));
+console.log("Zenodrop TikTok Farm v5 started.");
