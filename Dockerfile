@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Ставим Node.js, ffmpeg, yt-dlp и зависимости для Playwright
+# Node.js + системные зависимости
 RUN apt-get update && apt-get install -y \
     curl \
     ffmpeg \
@@ -9,27 +9,24 @@ RUN apt-get update && apt-get install -y \
     python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Ставим yt-dlp
+# yt-dlp + SignerPy (наш гибридный солвер)
 RUN pip3 install --no-cache-dir yt-dlp SignerPy==0.12.0
 
-# Ставим Playwright и его браузеры
-RUN pip3 install --.
-
-no-cache-dir playwright
-### КакENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Playwright + браузеры
+RUN pip3 install --no-cache-dir playwright
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 RUN python3 -m playwright install --with-deps chromium
 
 WORKDIR /app
 
-# Ставим Node-зависимости
+# Node-зависимости
 COPY package*.json ./
 RUN npm install --omit=dev
 
-# Копируем код
+# Код
 COPY . .
 
-# Создаём папку для временных файлов
-RUN mkdir -p /app/tmp && chmod 777 /app/tmp
+# Проверка что Python и Node оба на месте
+RUN python3 -c "from SignerPy import sign; print('SignerPy OK')" && node -v
 
-# Запуск
 CMD ["node", "bot.js"]
