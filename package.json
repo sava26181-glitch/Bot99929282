@@ -1,6 +1,6 @@
 {
   "name": "zenodrop-tiktok-farm",
-  "version": "5.0.0",
+  "version": "6.0.0",
   "private": true,
   "main": "bot.js",
   "scripts": {
