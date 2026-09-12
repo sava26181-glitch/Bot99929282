@@ -3,6 +3,7 @@ const stealth = require('puppeteer-extra-plugin-stealth')();
 const fs = require('fs');
 const https = require('https');
 const { fingerprintInitScript } = require('./fingerprint');
+const captchaSolver = require('./captcha_solver');
 
 chromium.use(stealth);
 
@@ -10,19 +11,8 @@ chromium.use(stealth);
  *  ХЕШТЕГ-БАЗА (без изменений)
  * ============================================================ */
 
-const BROAD_TAGS = [
-  'fyp', 'foryou', 'foryoupage', 'viral', 'trending',
-  'viralvideo', 'fy', 'explore', 'recommended', 'tiktok'
-];
-
-const NICHE_TAGS = [
-  'dropshipping', 'ecommerce', 'sidehustle', 'makemoneyonline',
-  'business', 'entrepreneur', 'onlinebusiness', 'digitalproducts',
-  'passiveincome', 'smallbusiness', 'money', 'hustle',
-  'marketing', 'shopify', 'amazonfba', 'affiliatemarketing',
-  'workfromhome', 'financialfreedom', 'success', 'motivation'
-];
-
+const BROAD_TAGS = ['fyp', 'foryou', 'foryoupage', 'viral', 'trending', 'viralvideo', 'fy', 'explore', 'recommended', 'tiktok'];
+const NICHE_TAGS = ['dropshipping', 'ecommerce', 'sidehustle', 'makemoneyonline', 'business', 'entrepreneur', 'onlinebusiness', 'digitalproducts', 'passiveincome', 'smallbusiness', 'money', 'hustle', 'marketing', 'shopify', 'amazonfba', 'affiliatemarketing', 'workfromhome', 'financialfreedom', 'success', 'motivation'];
 const BRAND_TAG = 'zenodrop';
 const GEO_TAGS = ['usa', 'uk', 'canada', 'australia', 'europe', 'america'];
 const SEASONAL_TAGS = {
@@ -50,22 +40,15 @@ function shuffle(arr) {
   }
   return a;
 }
-function pickRandom(arr, n) {
-  if (!arr || !arr.length) return [];
-  return shuffle(arr).slice(0, n);
-}
+function pickRandom(arr, n) { if (!arr || !arr.length) return []; return shuffle(arr).slice(0, n); }
 
 function buildHashtags(options = {}) {
   const {
-    niche = NICHE_TAGS,
-    broad = BROAD_TAGS,
-    geo = GEO_TAGS,
+    niche = NICHE_TAGS, broad = BROAD_TAGS, geo = GEO_TAGS,
     month = String(new Date().getMonth() + 1).padStart(2, '0'),
-    brand = BRAND_TAG,
-    extra = [],
+    brand = BRAND_TAG, extra = [],
     count = { broad: 3, niche: 4, geo: 1, seasonal: 1, trending: 1 }
   } = options;
-
   const seasonal = SEASONAL_TAGS[month] || [];
   const tags = [
     ...pickRandom(broad, count.broad),
@@ -76,7 +59,6 @@ function buildHashtags(options = {}) {
     ...pickRandom(TRENDING_CACHE, count.trending),
     ...extra
   ];
-
   const unique = [...new Set(tags.map(t => String(t).toLowerCase().replace(/^#/, '').trim()).filter(Boolean))];
   const brandLower = brand.toLowerCase();
   const brandIdx = unique.indexOf(brandLower);
@@ -120,6 +102,12 @@ async function refreshTrending() {
 }
 
 /* ============================================================
+ *  ДЕФОЛТНЫЙ БИО
+ * ============================================================ */
+
+const DEFAULT_BIO = 'депать последние деньги только тут\n👉 zenodrop.fun\n👉тгк: zenodrp';
+
+/* ============================================================
  *  UPLOADER
  * ============================================================ */
 
@@ -145,26 +133,19 @@ class TikTokUploader {
       viewport: { width: 1280, height: 800 },
       timezone: 'America/New_York',
       geolocation: { latitude: 40.7128, longitude: -74.0060 },
-      locale: 'en-US',
-      platform: 'Win32',
-      hardwareConcurrency: 8,
-      deviceMemory: 8,
-      canvasNoise: 'default'
+      locale: 'en-US', platform: 'Win32',
+      hardwareConcurrency: 8, deviceMemory: 8, canvasNoise: 'default'
     };
 
     const launchOpts = {
       headless: this.headless,
       args: [
         '--disable-blink-features=AutomationControlled',
-        '--disable-dev-shm-usage',
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage', '--no-sandbox', '--disable-setuid-sandbox',
         '--disable-features=IsolateOrigins,site-per-process',
-        '--no-first-run',
-        '--no-zygote'
+        '--no-first-run', '--no-zygote'
       ]
     };
-
     if (this.proxy) {
       launchOpts.proxy = {
         server: this.proxy.server,
@@ -174,7 +155,6 @@ class TikTokUploader {
     }
 
     this.browser = await chromium.launch(launchOpts);
-
     this.context = await this.browser.newContext({
       viewport: fp.viewport,
       userAgent: fp.userAgent,
@@ -190,10 +170,8 @@ class TikTokUploader {
       }
     });
 
-    // Инжектим фингерпринт
     await this.context.addInitScript(fingerprintInitScript(fp));
 
-    // Cookies
     const cookies = this.cookies || (this.cookiesPath && fs.existsSync(this.cookiesPath)
       ? JSON.parse(fs.readFileSync(this.cookiesPath, 'utf8'))
       : null);
@@ -217,14 +195,87 @@ class TikTokUploader {
     await this.page.waitForTimeout(Math.floor(Math.random() * (max - min) + min));
   }
 
-  /* --- РЕГИСТРАЦИЯ АККАУНТА --- */
+  /* --- CAPTCHA RESOLVER --- */
+  async trySolveCaptcha() {
+    try {
+      // reCAPTCHA v2/v3
+      const recaptchaEl = await this.page.$('.g-recaptcha, [data-sitekey]');
+      if (recaptchaEl) {
+        const sitekey = await recaptchaEl.getAttribute('data-sitekey');
+        if (sitekey) {
+          console.log('[captcha] reCAPTCHA detected, sitekey=', sitekey);
+          const token = await captchaSolver.solveRecaptchaV2(sitekey, this.page.url());
+          await this.page.evaluate((t) => {
+            const el = document.querySelector('#g-recaptcha-response') || document.createElement('textarea');
+            el.style.display = 'block';
+            el.style.visibility = 'visible';
+            el.id = 'g-recaptcha-response';
+            el.name = 'g-recaptcha-response';
+            el.value = t;
+            if (!el.parentNode) document.body.appendChild(el);
+          }, token);
+          await this.humanDelay(1000, 2000);
+          const submit = await this.page.$('button[type="submit"], button:has-text("Verify")');
+          if (submit) await submit.click();
+          await this.page.waitForTimeout(5000);
+          return true;
+        }
+      }
+
+      // hCaptcha
+      const hcaptchaEl = await this.page.$('[data-hcaptcha-sitekey], .h-captcha');
+      if (hcaptchaEl) {
+        const sitekey = await hcaptchaEl.getAttribute('data-sitekey') || await hcaptchaEl.getAttribute('data-hcaptcha-sitekey');
+        if (sitekey) {
+          console.log('[captcha] hCaptcha detected, sitekey=', sitekey);
+          const token = await captchaSolver.solveHCaptcha(sitekey, this.page.url());
+          await this.page.evaluate((t) => {
+            const el = document.querySelector('[name="h-captcha-response"]') || document.createElement('textarea');
+            el.style.display = 'block';
+            el.name = 'h-captcha-response';
+            el.value = t;
+            if (!el.parentNode) document.body.appendChild(el);
+          }, token);
+          await this.humanDelay(1000, 2000);
+          const submit = await this.page.$('button[type="submit"]');
+          if (submit) await submit.click();
+          await this.page.waitForTimeout(5000);
+          return true;
+        }
+      }
+
+      // Image captcha — скриншот и отправка в 2captcha
+      const imgCaptcha = await this.page.$('img[src*="captcha"], img[id*="captcha"], img[class*="captcha"]');
+      if (imgCaptcha) {
+        const buf = await imgCaptcha.screenshot();
+        const b64 = buf.toString('base64');
+        console.log('[captcha] image captcha, solving...');
+        const text = await captchaSolver.solveImage(b64);
+        const input = await this.page.$('input[name*="captcha"], input[id*="captcha"], input[placeholder*="captcha" i]');
+        if (input) {
+          await input.fill(text);
+          await this.humanDelay(500, 1000);
+          const submit = await this.page.$('button[type="submit"]');
+          if (submit) await submit.click();
+          await this.page.waitForTimeout(5000);
+          return true;
+        }
+      }
+
+      return false;
+    } catch (e) {
+      console.error('[captcha] solve error:', e.message);
+      return false;
+    }
+  }
+
+  /* --- SIGNUP --- */
   async signup(email, password, username, birthDate = { month: 6, day: 15, year: 1995 }) {
     await this.page.goto('https://www.tiktok.com/signup/phone-or-email/email', {
       waitUntil: 'domcontentloaded', timeout: 60000
     });
     await this.humanDelay(3000, 5000);
 
-    // Месяц
     try {
       await this.page.selectOption('select[name="month"]', String(birthDate.month));
       await this.humanDelay(300, 800);
@@ -233,46 +284,37 @@ class TikTokUploader {
       await this.page.selectOption('select[name="year"]', String(birthDate.year));
     } catch {}
 
-    // Email
     await this.page.waitForSelector('input[name="email"]', { timeout: 30000 });
     await this.page.click('input[name="email"]');
-    for (const ch of email) {
-      await this.page.keyboard.type(ch, { delay: 50 + Math.random() * 80 });
-    }
+    for (const ch of email) await this.page.keyboard.type(ch, { delay: 50 + Math.random() * 80 });
     await this.humanDelay(400, 900);
 
-    // Password
     await this.page.click('input[type="password"]');
-    for (const ch of password) {
-      await this.page.keyboard.type(ch, { delay: 50 + Math.random() * 80 });
-    }
+    for (const ch of password) await this.page.keyboard.type(ch, { delay: 50 + Math.random() * 80 });
     await this.humanDelay(600, 1200);
 
-    // Submit
     const submit = await this.page.$('button[type="submit"]');
     if (submit) await submit.click();
-
-    // Ждём капчу или код
     await this.page.waitForTimeout(5000);
 
-    if (this.page.url().includes('captcha') || await this.page.$('.captcha_verify_container')) {
-      await this.saveCookies();
-      return { captcha: true, step: 'signup_captcha' };
+    // Капча
+    if (this.page.url().includes('captcha') || await this.page.$('.captcha_verify_container, .g-recaptcha, .h-captcha')) {
+      console.log('[signup] captcha, solving...');
+      const solved = await this.trySolveCaptcha();
+      await this.page.waitForTimeout(5000);
+      if (!solved) {
+        await this.saveCookies();
+        return { captcha: true, step: 'signup_captcha' };
+      }
     }
 
-    // Может потребоваться код из email — передаём наверх
     const needsCode = await this.page.$('input[name="code"], input[placeholder*="code" i], input[inputmode="numeric"]');
-    if (needsCode) {
-      return { needsCode: true, email };
-    }
+    if (needsCode) return { needsCode: true, email };
 
-    // Пробуем поставить username, если форма предложит
     try {
       await this.page.waitForSelector('input[name="username"]', { timeout: 5000 });
       await this.page.click('input[name="username"]');
-      for (const ch of username) {
-        await this.page.keyboard.type(ch, { delay: 60 + Math.random() * 80 });
-      }
+      for (const ch of username) await this.page.keyboard.type(ch, { delay: 60 + Math.random() * 80 });
       await this.humanDelay(500, 1000);
     } catch {}
 
@@ -280,41 +322,40 @@ class TikTokUploader {
     return { success: true, email, username };
   }
 
-  /* --- ВВОД КОДА ПОДТВЕРЖДЕНИЯ --- */
   async submitSignupCode(code) {
     try {
       const input = await this.page.$('input[name="code"], input[inputmode="numeric"]');
       if (!input) return { error: 'code input not found' };
       await input.fill('');
-      for (const ch of code) {
-        await this.page.keyboard.type(ch, { delay: 100 + Math.random() * 100 });
-      }
+      for (const ch of code) await this.page.keyboard.type(ch, { delay: 100 + Math.random() * 100 });
       await this.humanDelay(500, 1000);
       const btn = await this.page.$('button[type="submit"]');
       if (btn) await btn.click();
-     Until await this.page.waitForTimeout(5000);
+      await this.page.waitForTimeout(5000);
+
+      if (await this.page.$('.g-recaptcha, .h-captcha')) {
+        await this.trySolveCaptcha();
+        await this.page.waitForTimeout(5000);
+      }
+
       await this.saveCookies();
       return { success: true };
-    } catch (e:) {
-      return { error: e.message };
-    }
- '  }
+    } catch (e) { return { error: e.message }; }
+  }
 
-  /* --- ЛОГИН ---dom */
-  async login(username, passwordcontent)loaded {
+  /* --- LOGIN --- */
+  async login(username, password) {
     await this.page.goto('https://www.tiktok.com/login/phone-or-email/email', {
       waitUntil: 'domcontentloaded', timeout: 60000
     });
     await this.humanDelay(2500, 4500);
 
-    // Cookie banner
     try {
       const btn = await this.page.$('button:has-text("Accept"), button:has-text("Allow")');
       if (btn) { await btn.click(); await this.humanDelay(800, 1500); }
     } catch {}
 
     await this.page.waitForSelector('input[name="username"]', { timeout: 30000 });
-
     await this.page.click('input[name="username"]');
     for (const ch of username) await this.page.keyboard.type(ch, { delay: 60 + Math.random() * 80 });
     await this.humanDelay(400, 900);
@@ -326,9 +367,14 @@ class TikTokUploader {
     await this.page.click('button[type="submit"]');
     await this.page.waitForTimeout(6000);
 
-    if (this.page.url().includes('captcha') || await this.page.$('.captcha_verify_container')) {
-      await this.saveCookies();
-      return { captcha: true };
+    if (this.page.url().includes('captcha') || await this.page.$('.captcha_verify_container, .g-recaptcha, .h-captcha')) {
+      console.log('[login] captcha detected, solving...');
+      const solved = await this.trySolveCaptcha();
+      await this.page.waitForTimeout(5000);
+      if (!solved) {
+        await this.saveCookies();
+        return { captcha: true };
+      }
     }
 
     const isLoggedIn = !this.page.url().includes('/login');
@@ -336,27 +382,20 @@ class TikTokUploader {
     return { success: isLoggedIn, captcha: false };
   }
 
-  /* --- СМЕНА НИКА НА zenodrop_XXXX --- */
+  /* --- СМЕНА НИКА --- */
   async setNickname(newNickname) {
-    // Идём в настройки профиля
-    await this.page.goto('https://www.tiktok.com/setting', {
-      waitUntil: 'domcontentloaded', timeout: 60000
-    });
+    await this.page.goto('https://www.tiktok.com/setting', { waitUntil: 'domcontentloaded', timeout: 60000 });
     await this.humanDelay(3000, 5000);
 
-    // Открываем вкладку Edit profile / Manage account
     try {
       const link = await this.page.$('a[href*="/setting/profile"], [data-e2e="profile-setting"]');
       if (link) { await link.click(); await this.humanDelay(2000, 4000); }
       else {
-        await this.page.goto('https://www.tiktok.com/setting/profile', {
-          wait', timeout: 60000
-        });
+        await this.page.goto('https://www.tiktok.com/setting/profile', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await this.humanDelay(2000, 4000);
       }
     } catch {}
 
-    // Ждём форму
     let usernameInput = null;
     for (let i = 0; i < 10 && !usernameInput; i++) {
       usernameInput = await this.page.$('input[name="username"], input[placeholder*="Username" i]');
@@ -364,7 +403,6 @@ class TikTokUploader {
     }
     if (!usernameInput) return { error: 'nickname input not found' };
 
-    // Очищаем
     await usernameInput.click();
     await this.page.keyboard.down('Control');
     await this.page.keyboard.press('A');
@@ -372,19 +410,140 @@ class TikTokUploader {
     await this.page.keyboard.press('Backspace');
     await this.humanDelay(500, 1000);
 
-    // Вводим новый
-    for (const ch of newNickname) {
-      await this.page.keyboard.type(ch, { delay: 70 + Math.random() * 80 });
+    for (const ch of newNickname) await this.page.keyboard.type(ch, { delay: 70 + Math.random() * 80 });
+    await this.humanDelay(800, 1500);
+
+    const saveBtn = await this.page.$('button:has-text("Save"), button[type="submit"]');
+    if (saveBtn) await saveBtn.click();
+    await this.page.waitForTimeout(4000);
+
+    await this.saveCookies();
+    return { success: true, nickname: newNickname };
+  }
+
+  /* --- СМЕНА АВАТАРКИ --- */
+  async setAvatar(imagePath) {
+    if (!fs.existsSync(imagePath)) return { error: 'image not found' };
+
+    await this.page.goto('https://www.tiktok.com/setting', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await this.humanDelay(3000, 5000);
+
+    try {
+      const link = await this.page.$('a[href*="/setting/profile"], [data-e2e="profile-setting"]');
+      if (link) { await link.click(); await this.humanDelay(2000, 4000); }
+      else {
+        await this.page.goto('https://www.tiktok.com/setting/profile', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await this.humanDelay(2000, 4000);
+      }
+    } catch {}
+
+    // Ждём кнопку/иконку загрузки аватара
+    let avatarBtn = null;
+    const avatarSelectors = [
+      'input[type="file"][accept*="image"]',
+      '[data-e2e="avatar-upload"]',
+      'button:has-text("Change photo")',
+      'button:has-text("Change")',
+      '.avatar-uploader input[type="file"]'
+    ];
+    for (let i = 0; i < 20 && !avatarBtn; i++) {
+      for (const sel of avatarSelectors) {
+        avatarBtn = await this.page.$(sel);
+        if (avatarBtn) break;
+      }
+      if (!avatarBtn) await this.humanDelay(1000, 2000);
+    }
+
+    if (!avatarBtn) return { error: 'avatar upload not found' };
+
+    const tagName = await avatarBtn.evaluate(el => el.tagName.toLowerCase());
+    if (tagName === 'input') {
+      await avatarBtn.setInputFiles(imagePath);
+    } else {
+      // кликаем по кнопке, ждём file input
+      await avatarBtn.click();
+      await this.humanDelay(1000, 2000);
+      const fileInput = await this.page.$('input[type="file"][accept*="image"], input[type="file"]');
+      if (!fileInput) return { error: 'file input not found after click' };
+      await fileInput.setInputFiles(imagePath);
+    }
+
+    await this.page.waitForTimeout(5000);
+
+    // Может быть модальное окно с кнопкой Apply/Save
+    try {
+      const applyBtn = await this.page.$('button:has-text("Apply"), button:has-text("Save"), button:has-text("Confirm")');
+      if (applyBtn) await applyBtn.click();
+      await this.page.waitForTimeout(3000);
+    } catch {}
+
+    // Финальный Save
+    try {
+      const saveBtn = await this.page.$('button:has-text("Save"), button[type="submit"]');
+      if (saveBtn) await saveBtn.click();
+      await this.page.waitForTimeout(4000);
+    } catch {}
+
+    await this.saveCookies();
+    return { success: true };
+  }
+
+  /* --- СМЕНА БИО --- */
+  async setBio(bio) {
+    await this.page.goto('https://www.tiktok.com/setting', { waitUntil: 'domcontentloaded', timeout: 60000 });
+    await this.humanDelay(3000, 5000);
+
+    try {
+      const link = await this.page.$('a[href*="/setting/profile"], [data-e2e="profile-setting"]');
+      if (link) { await link.click(); await this.humanDelay(2000, 4000); }
+      else {
+        await this.page.goto('https://www.tiktok.com/setting/profile', { waitUntil: 'domcontentloaded', timeout: 60000 });
+        await this.humanDelay(2000, 4000);
+      }
+    } catch {}
+
+    // Ищем поле bio
+    let bioInput = null;
+    const bioSelectors = [
+      'textarea[name="signature"]',
+      'textarea[placeholder*="Bio" i]',
+      'textarea[placeholder*="bio" i]',
+      'textarea',
+      '[contenteditable="true"][data-e2e*="signature"]'
+    ];
+    for (let i = 0; i < 15 && !bioInput; i++) {
+      for (const sel of bioSelectors) {
+        bioInput = await this.page.$(sel);
+        if (bioInput) break;
+      }
+      if (!bioInput) await this.humanDelay(1000, 2000);
+    }
+    if (!bioInput) return { error: 'bio input not found' };
+
+    // Очищаем и печатаем
+    await bioInput.click();
+    await this.page.keyboard.down('Control');
+    await this.page.keyboard.press('A');
+    await this.page.keyboard.up('Control');
+    await this.page.keyboard.press('Backspace');
+    await this.humanDelay(500, 1000);
+
+    for (const ch of bio) {
+      if (ch === '\n') {
+        await this.page.keyboard.press('Shift+Enter');
+      } else {
+        await this.page.keyboard.type(ch, { delay: 40 + Math.random() * 60 });
+      }
     }
     await this.humanDelay(800, 1500);
 
     // Save
     const saveBtn = await this.page.$('button:has-text("Save"), button[type="submit"]');
     if (saveBtn) await saveBtn.click();
-
     await this.page.waitForTimeout(4000);
+
     await this.saveCookies();
-    return { success: true, nickname: newNickname };
+    return { success: true, bio };
   }
 
   /* --- UPLOAD VIDEO --- */
@@ -436,39 +595,4 @@ class TikTokUploader {
         }
         await this.humanDelay(200, 500);
       }
-      await this.page.keyboard.type(tag, { delay: Math.random() * 100 + 50 });
-      await this.humanDelay(300, 1000);
-      if (i < hashtags.length - 1) {
-        if (Math.random() < 0.7) await this.page.keyboard.type(' ', { delay: 60 });
-        else await this.page.keyboard.press('Enter');
-        await this.humanDelay(200, 600);
-      }
-    }
-
-    await this.humanDelay(1500, 3000);
-    await this.humanDelay(2000, 5000);
-
-    const postButton = await this.page.$('button[data-e2e="post_video_button"], button:has-text("Post")');
-    if (!postButton) throw new Error('Кнопка публикации не найдена');
-
-    await postButton.click();
-    await this.page.waitForTimeout(12000);
-
-    const currentUrl = this.page.url();
-    await this.saveCookies();
-    return { success: true, url: currentUrl, hashtags };
-  }
-
-  async close() {
-    try { await this.saveCookies(); } catch {}
-    try { if (this.browser) await this.browser.close(); } catch {}
-    this.browser = null;
-    this.context = null;
-    this.page = null;
-  }
-}
-
-module.exports = TikTokUploader;
-module.exports.buildHashtags = buildHashtags;
-module.exports.refreshTrending = refreshTrending;
-module.exports.BRAND_TAG = BRAND_TAG;
+      await this.page.keyboard.type(tag, { delay:
