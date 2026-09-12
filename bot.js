@@ -237,4 +237,504 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
     filterParts.push(`[apre][abanner][apost]concat=n=3:v=0:a=1[aout]`);
 
     args.push(
-      "-filter_complex", filterParts
+      "-filter_complex", filterParts.join(";"),
+      "-map", "[vout]", "-map", "[aout]",
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
+      "-pix_fmt", "yuv420p",
+      "-c:a", "aac", "-b:a", "128k",
+      "-movflags", "+faststart",
+      "-threads", "0",
+      output
+    );
+  } else {
+    args.push(
+      "-filter_complex", filterParts.join(";"),
+      "-map", "[vout]", "-an",
+      "-c:v", "libx264", "-preset", "ultrafast", "-crf", "27",
+      "-pix_fmt", "yuv420p",
+      "-movflags", "+faststart",
+      "-threads", "0",
+      output
+    );
+  }
+
+  await run("ffmpeg", args);
+}
+
+/* ============================================================
+ *  КЛАВИАТУРЫ
+ * ============================================================ */
+
+function settingsKeyboard() {
+  return {
+    inline_keyboard: [
+      [
+        { text: "⏱ Секунда", callback_data: "time" },
+        { text: "⏳ Длительность", callback_data: "duration" }
+      ],
+      [
+        { text: "🖼 1", callback_data: "count1" },
+        { text: "🖼 2", callback_data: "count2" },
+        { text: "🖼 3", callback_data: "count3" }
+      ],
+      [{ text: "🚀 ОБРАБОТАТЬ БАННЕР", callback_data: "render" }]
+    ]
+  };
+}
+
+function mainMenuKeyboard() {
+  return {
+    inline_keyboard: [
+      [{ text: "➕ Добавить аккаунт", callback_data: "add_account" }],
+      [{ text: "📋 Список аккаунтов", callback_data: "list_accounts" }],
+      [{ text: "🔥 Прогреть аккаунт", callback_data: "warm" }],
+      [{ text: "🏷 Обновить тренды", callback_data: "refresh_trends" }],
+      [{ text: "📊 Статус", callback_data: "status" }]
+    ]
+  };
+}
+
+function accountsKeyboard(prefix, filterFn = () => true) {
+  const rows = [];
+  for (const [id, acc] of accounts) {
+    if (!filterFn(acc)) continue;
+    rows.push([
+      {
+        text: `${prefix} ${acc.name} (${acc.status})`,
+        callback_data: `${prefix === "📤" ? "post_" : "warm_"}${id}`
+      },
+      {
+        text: "🏷",
+        callback_data: `preview_tags_${id}`
+      }
+    ]);
+  }
+  return { inline_keyboard: rows };
+}
+
+function showSettings(chatId) {
+  const s = sessions.get(chatId);
+  return bot.sendMessage(
+    chatId,
+    `⚙️ Настройки баннера\n\n` +
+    `⏱ Вставка: ${s.insertAt} сек.\n` +
+    `⏳ Баннер: ${s.duration} сек.\n` +
+    `🖼 Баннеров одновременно: ${s.count}\n\n` +
+    `Выбери параметры и жми «ОБРАБОТАТЬ».`,
+    { reply_markup: settingsKeyboard() }
+  );
+}
+
+/* ============================================================
+ *  КОМАНДЫ
+ * ============================================================ */
+
+bot.onText(/^\/start$/, msg => {
+  bot.sendMessage(
+    msg.chat.id,
+    "🎬 *Zenodrop TikTok Bot v4*\n\n" +
+    "1. Пришли видео (файлом) или ссылку TikTok.\n" +
+    "2. Настрой вставку баннера.\n" +
+    "3. Выбери аккаунт — бот прогреет его и зальёт готовое видео с хештегами.\n\n" +
+    "Команды:\n" +
+    "/menu — меню аккаунтов\n" +
+    "Для добавления аккаунта: отправь `login:password:name:tag1,tag2`",
+    { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() }
+  );
+});
+
+bot.onText(/^\/menu$/, msg => {
+  bot.sendMessage(msg.chat.id, "📋 Меню:", { reply_markup: mainMenuKeyboard() });
+});
+
+/* ============================================================
+ *  ОБРАБОТКА ВИДЕО
+ * ============================================================ */
+
+bot.on("video", async msg => {
+  const chatId = msg.chat.id;
+  const size = Number(msg.video.file_size || 0);
+
+  if (size && size > MAX_MB * 1024 * 1024) {
+    return bot.sendMessage(chatId, `❌ Максимальный размер видео: ${MAX_MB} МБ.`);
+  }
+
+  const input = path.join(TMP, `${crypto.randomUUID()}_input.mp4`);
+  try {
+    await bot.sendMessage(chatId, "⬇️ Получаю видео...");
+    await download(msg.video.file_id, input);
+    const info = await probe(input);
+
+    const old = sessions.get(chatId);
+    if (old) {
+      cleanup(old.input, old.rendered);
+    }
+
+    sessions.set(chatId, {
+      input,
+      insertAt: Math.min(DEFAULT_INSERT, Math.max(0.1, info.duration - 0.1)),
+      duration: DEFAULT_DURATION,
+      count: 1,
+      waiting: null,
+      videoDuration: info.duration,
+      caption: msg.caption || "",
+      rendered: null
+    });
+
+    await showSettings(chatId);
+  } catch (e) {
+    console.error("DOWNLOAD/PROBE ERROR:", e);
+    cleanup(input);
+    bot.sendMessage(chatId, "❌ Не удалось получить видео.");
+  }
+});
+
+/* ============================================================
+ *  ТЕКСТОВЫЕ СООБЩЕНИЯ
+ * ============================================================ */
+
+bot.on("message", async msg => {
+  const chatId = msg.chat.id;
+  const text = (msg.text || "").trim();
+  if (!text || text.startsWith("/")) return;
+
+  // TikTok URL
+  if (isTikTokUrl(text)) {
+    const input = path.join(TMP, `${crypto.randomUUID()}_tiktok.mp4`);
+    try {
+      const old = sessions.get(chatId);
+      if (old) cleanup(old.input, old.rendered);
+
+      await bot.sendMessage(chatId, "⬇️ Скачиваю TikTok...");
+      await downloadTikTok(text, input);
+      const info = await probe(input);
+
+      sessions.set(chatId, {
+        input,
+        insertAt: Math.min(DEFAULT_INSERT, Math.max(0.1, info.duration - 0.1)),
+        duration: DEFAULT_DURATION,
+        count: 1,
+        waiting: null,
+        videoDuration: info.duration,
+        caption: "",
+        rendered: null
+      });
+
+      await showSettings(chatId);
+    } catch (e) {
+      cleanup(input);
+      await bot.sendMessage(chatId, `❌ Не удалось скачать TikTok.\n\n${String(e.message || e).slice(0, 1200)}`);
+    }
+    return;
+  }
+
+  if (isUrl(text)) {
+    return bot.sendMessage(chatId, "❌ Поддерживаются только ссылки на TikTok.");
+  }
+
+  const s = sessions.get(chatId);
+
+  // Добавление аккаунта
+  const accMatch = text.match(/^([^:]+):([^:]+):([^:]+)(?::(.+))?$/);
+  if (!s && accMatch) {
+    const [, login, password, name, nicheStr] = accMatch;
+    const id = crypto.randomUUID().slice(0, 8);
+    accounts.set(id, {
+      id,
+      name: name.trim(),
+      login: login.trim(),
+      password: password.trim(),
+      niche: nicheStr
+        ? nicheStr.split(',').map(t => t.trim().toLowerCase().replace(/^#/, '')).filter(Boolean)
+        : null,
+      status: "new",
+      uploader: new TikTokUploader({
+        cookiesPath: path.join(ROOT, `cookies_${id}.json`),
+        headless: HEADLESS
+      })
+    });
+    return bot.sendMessage(chatId,
+      `✅ Аккаунт "${name.trim()}" добавлен.\nID: \`${id}\`\n` +
+      (nicheStr ? `Ниша: ${nicheStr}` : `Ниша: общая`),
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  if (!s) return;
+
+  if (s.waiting === "time") {
+    const value = Number(msg.text.replace(",", "."));
+    if (!Number.isFinite(value) || value < 0 || value >= s.videoDuration - 0.03) {
+      return bot.sendMessage(chatId, `❌ Введи секунду от 0 до ${(s.videoDuration - 0.03).toFixed(2)}.`);
+    }
+    s.insertAt = value;
+    s.waiting = null;
+    return showSettings(chatId);
+  }
+
+  if (s.waiting === "duration") {
+    const value = Number(msg.text.replace(",", "."));
+    if (!Number.isFinite(value) || value < 0.5 || value > 60) {
+      return bot.sendMessage(chatId, "❌ От 0.5 до 60 секунд.");
+    }
+    s.duration = value;
+    s.waiting = null;
+    return showSettings(chatId);
+  }
+});
+
+/* ============================================================
+ *  CALLBACK QUERY
+ * ============================================================ */
+
+bot.on("callback_query", async q => {
+  const chatId = q.message.chat.id;
+  const s = sessions.get(chatId);
+  const data = q.data;
+
+  /* --- МЕНЮ АККАУНТОВ --- */
+  if (data === "add_account") {
+    await bot.answerCallbackQuery(q.id);
+    return bot.sendMessage(chatId,
+      "➕ Отправь: `login:password:name:tag1,tag2,tag3`\n\n" +
+      "Пример:\n`user@mail.com:pass123:myacc:dropshipping,ecommerce,money`\n\n" +
+      "Последняя часть (ниша) — опционально.",
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  if (data === "list_accounts") {
+    await bot.answerCallbackQuery(q.id);
+    if (accounts.size === 0) return bot.sendMessage(chatId, "📋 Нет аккаунтов.");
+    let text = "📋 *Аккаунты:*\n\n";
+    for (const [id, acc] of accounts) {
+      text += `• *${acc.name}* (\`${id}\`)\n`;
+      text += `  Статус: ${acc.status}\n`;
+      text += `  Login: ${acc.login}\n`;
+      if (acc.niche) text += `  Ниша: ${acc.niche.join(', ')}\n`;
+      text += `\n`;
+    }
+    return bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+  }
+
+  if (data === "status") {
+    await bot.answerCallbackQuery(q.id);
+    let text = `📊 *Статус*\n\nАккаунтов: ${accounts.size}\nСессий: ${sessions.size}\n\n`;
+    for (const [id, acc] of accounts) text += `• ${acc.name}: ${acc.status}\n`;
+    return bot.sendMessage(chatId, text, { parse_mode: "Markdown" });
+  }
+
+  if (data === "refresh_trends") {
+    await bot.answerCallbackQuery(q.id, { text: "Обновляю..." });
+    try {
+      const tags = await refreshTrending();
+      return bot.sendMessage(chatId, `🔥 Тренды обновлены: ${tags.length} тегов\n\n${tags.slice(0, 15).join(' ')}`);
+    } catch (e) {
+      return bot.sendMessage(chatId, `❌ Ошибка: ${e.message}`);
+    }
+  }
+
+  /* --- ПРОГРЕВ --- */
+  if (data === "warm") {
+    await bot.answerCallbackQuery(q.id);
+    if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
+    return bot.sendMessage(chatId, "🔥 Выбери аккаунт для прогрева:", {
+      reply_markup: accountsKeyboard("🔥")
+    });
+  }
+
+  if (data.startsWith("warm_")) {
+    const accId = data.slice(5);
+    await bot.answerCallbackQuery(q.id);
+    return startWarm(chatId, accId);
+  }
+
+  /* --- ПРЕВЬЮ ХЕШТЕГОВ --- */
+  if (data.startsWith("preview_tags_")) {
+    const accId = data.slice("preview_tags_".length);
+    await bot.answerCallbackQuery(q.id);
+    const acc = accounts.get(accId);
+    if (!acc) return bot.sendMessage(chatId, "❌ Аккаунт не найден.");
+
+    const tags = buildHashtags({
+      niche: acc.niche || undefined,
+      extra: acc.extraTags || []
+    });
+
+    return bot.sendMessage(chatId,
+      `🏷 *Хештеги для ${acc.name}:*\n\n${tags.join(' ')}\n\nВсего: ${tags.length}`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
+  /* --- НАСТРОЙКИ БАННЕРА --- */
+  if (!s) {
+    return bot.answerCallbackQuery(q.id, { text: "Сначала отправь видео." });
+  }
+
+  if (data === "time") {
+    s.waiting = "time";
+    await bot.answerCallbackQuery(q.id);
+    return bot.sendMessage(chatId, "⏱ На какой секунде вставить баннер?\nНапример: 7");
+  }
+
+  if (data === "duration") {
+    s.waiting = "duration";
+    await bot.answerCallbackQuery(q.id);
+    return bot.sendMessage(chatId, "⏳ Сколько секунд показывать баннер?\nНапример: 4");
+  }
+
+  if (/^count[123]$/.test(data)) {
+    s.count = Number(data.slice(-1));
+    await bot.answerCallbackQuery(q.id, { text: `Выбрано: ${s.count}` });
+    return showSettings(chatId);
+  }
+
+  /* --- РЕНДЕР --- */
+  if (data === "render") {
+    await bot.answerCallbackQuery(q.id);
+    const output = path.join(TMP, `${crypto.randomUUID()}_rendered.mp4`);
+
+    try {
+      await bot.sendMessage(chatId, "🎬 Вставляю баннер...");
+      await renderVideo(s.input, output, s.insertAt, s.duration, s.count);
+      s.rendered = output;
+
+      await bot.sendVideo(chatId, output, {
+        caption: "✅ Баннер вставлен. Теперь выбери аккаунт для загрузки.",
+        supports_streaming: true
+      });
+
+      if (accounts.size === 0) {
+        return bot.sendMessage(chatId, "❌ Нет аккаунтов. Добавь: /menu → ➕");
+      }
+
+      await bot.sendMessage(chatId, "📤 Куда заливаем?", {
+        reply_markup: accountsKeyboard("📤")
+      });
+    } catch (e) {
+      console.error("=== FFMPEG ERROR ===", e);
+      await bot.sendMessage(chatId, `❌ Ошибка FFmpeg:\n\n${String(e.message || e).slice(0, 1200)}`);
+    }
+    return;
+  }
+
+  /* --- ЗАЛИВ В TIKTOK --- */
+  if (data.startsWith("post_")) {
+    const accId = data.slice(5);
+    await bot.answerCallbackQuery(q.id);
+    if (!s?.rendered) {
+      return bot.sendMessage(chatId, "❌ Сначала обработай баннер.");
+    }
+    return startPost(chatId, accId, s);
+  }
+});
+
+/* ============================================================
+ *  ПРОГРЕВ + ПОСТИНГ
+ * ============================================================ */
+
+async function startWarm(chatId, accountId) {
+  const acc = accounts.get(accountId);
+  if (!acc) return bot.sendMessage(chatId, "❌ Аккаунт не найден.");
+
+  acc.status = "warming";
+  await bot.sendMessage(chatId, `🔥 Начинаю прогрев ${acc.name}...`);
+
+  try {
+    await acc.uploader.init();
+
+    if (!fs.existsSync(acc.uploader.cookiesPath)) {
+      const result = await acc.uploader.login(acc.login, acc.password);
+      if (result.captcha) {
+        acc.status = "captcha";
+        return bot.sendMessage(chatId,
+          `⚠️ Капча при логине ${acc.name}.\nОткрой Render Shell и реши вручную.`
+        );
+      }
+    }
+
+    const warmer = new TikTokWarmer(acc.uploader);
+    await warmer.warmAccount(3, 20);
+
+    acc.status = "warmed";
+    await bot.sendMessage(chatId, `✅ Прогрев ${acc.name} завершён!`);
+  } catch (e) {
+    console.error("warm error:", e);
+    acc.status = "error";
+    await bot.sendMessage(chatId, `❌ Ошибка прогрева ${acc.name}:\n${e.message}`);
+  } finally {
+    await acc.uploader.close();
+  }
+}
+
+async function startPost(chatId, accountId, session) {
+  const acc = accounts.get(accountId);
+  if (!acc) return bot.sendMessage(chatId, "❌ Аккаунт не найден.");
+
+  acc.status = "posting";
+  await bot.sendMessage(chatId, `📤 Логинюсь и заливаю в ${acc.name}...`);
+
+  try {
+    await acc.uploader.init();
+
+    if (!fs.existsSync(acc.uploader.cookiesPath)) {
+      const result = await acc.uploader.login(acc.login, acc.password);
+      if (result.captcha) {
+        acc.status = "captcha";
+        return bot.sendMessage(chatId, `⚠️ Капча. Реши вручную.`);
+      }
+    }
+
+    // Немного прогрева перед постом
+    const warmer = new TikTokWarmer(acc.uploader);
+    await warmer.randomScroll(60);
+
+    // Хештеги
+    const hashtags = buildHashtags({
+      niche: acc.niche || undefined,
+      extra: acc.extraTags || []
+    });
+
+    const caption = session.caption || "Check this out 🔥";
+
+    await bot.sendMessage(
+      chatId,
+      `🏷 *Хештеги для ${acc.name}:*\n${hashtags.join(' ')}`,
+      { parse_mode: "Markdown" }
+    );
+
+    const result = await acc.uploader.uploadVideo(session.rendered, caption, {
+      hashtags
+    });
+
+    acc.status = "posted";
+    await bot.sendMessage(chatId,
+      `✅ Залито в ${acc.name}!\n${result.url || ''}\n\n` +
+      `Хештеги: ${result.hashtags.join(' ')}`
+    );
+  } catch (e) {
+    console.error("post error:", e);
+    acc.status = "error";
+    await bot.sendMessage(chatId, `❌ Ошибка заливки ${acc.name}:\n${String(e.message || e).slice(0, 1000)}`);
+  } finally {
+    await acc.uploader.close();
+    if (session.input) cleanup(session.input);
+    if (session.rendered) cleanup(session.rendered);
+    sessions.delete(chatId);
+  }
+}
+
+/* ============================================================
+ *  СТАРТ
+ * ============================================================ */
+
+bot.on("polling_error", err => {
+  console.error("TELEGRAM POLLING ERROR:", err?.message || err);
+});
+
+// Раз в сутки — обновление трендов
+refreshTrending().catch(() => {});
+setInterval(() => refreshTrending().catch(() => {}), 24 * 60 * 60 * 1000);
+
+console.log("Zenodrop TikTok Bot v4 started.");
