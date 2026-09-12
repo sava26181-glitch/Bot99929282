@@ -216,10 +216,20 @@ class TikTokMobile {
 
   async registerDevice() {
     const result = await this.signedRequest('/service/2/device_register/', {});
+
+    console.log('[DEVICE REGISTER RAW]:', JSON.stringify(result).slice(0, 600));
+
     if (result.device_id_str) this.deviceId = result.device_id_str;
     else if (result.device_id) this.deviceId = String(result.device_id);
     if (result.iid) this.iid = result.iid;
     if (result.install_id) this.installId = result.install_id;
+
+    console.log('[DEVICE REGISTER] deviceId =', this.deviceId, '| iid =', this.iid);
+
+    if (!this.deviceId) {
+      throw new Error('device_register failed: no device_id — проверь SignerPy и прокси');
+    }
+
     return result;
   }
 
@@ -234,8 +244,10 @@ class TikTokMobile {
 
     const result = await this.signedRequest('/passport/user/register/', params);
 
+    console.log('[SIGNUP RAW]:', JSON.stringify(result).slice(0, 800));
+
     if (result.message === 'captcha' || result.data?.captcha || result.error_code === 10001) {
-      return { captcha: true };
+      return { captcha: true, raw: result };
     }
     if (result.data?.need_verify || result.message === 'verify') {
       return { needsCode: true, email };
@@ -243,7 +255,7 @@ class TikTokMobile {
     if (result.data?.session_key) {
       this.cookies = `sessionid=${result.data.session_key}`;
       if (this.onCookies) await this.onCookies(this.cookies);
-      return { success: true };
+      return { success: true, raw: result };
     }
     return { success: false, raw: result };
   }
