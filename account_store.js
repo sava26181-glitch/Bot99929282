@@ -2,27 +2,6 @@ const fs = require('fs');
 const path = require('path');
 
 let pool = null;
-const DATA_DIR = process.env.DATA_DIR || __dirname;
-const ACCOUNTS_FILE = path.join(DATA_DIR, 'accounts.json');
-const PROXIES_FILE = path.join(DATA_DIR, 'proxies.json');
-
-function readJson(file, fallback = {}) {
-  try {
-    if (!fs.existsSync(file)) return fallback;
-    const raw = fs.readFileSync(file, 'utf8');
-    return raw.trim() ? JSON.parse(raw) : fallback;
-  } catch (e) {
-    console.error(`[store] read ${path.basename(file)}:`, e.message);
-    return fallback;
-  }
-}
-
-function writeJson(file, value) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(value, null, 2), 'utf8');
-  fs.renameSync(tmp, file);
-}
 
 function initDB() {
   if (!process.env.DATABASE_URL) {
@@ -34,15 +13,11 @@ function initDB() {
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
       ssl: { rejectUnauthorized: false },
-      max: 10,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 10000
+      max: 20
     });
-    pool.on('error', err => console.error('[store] postgres pool error:', err.message));
     return pool;
   } catch (e) {
     console.error('[store] pg init error:', e.message);
-    pool = null;
     return null;
   }
 }
@@ -59,6 +34,7 @@ async function migrate() {
       proxy_json TEXT,
       fingerprint_json TEXT,
       cookies_json TEXT,
+      profile_url TEXT,
       status TEXT DEFAULT 'new',
       created_at TIMESTAMPTZ DEFAULT NOW(),
       updated_at TIMESTAMPTZ DEFAULT NOW(),
@@ -66,6 +42,7 @@ async function migrate() {
       posts_count INT DEFAULT 0
     )
   `);
+  await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS profile_url TEXT`).catch(() => {});
   await pool.query(`
     CREATE TABLE IF NOT EXISTS proxies (
       id TEXT PRIMARY KEY,
@@ -80,257 +57,290 @@ async function migrate() {
       created_at TIMESTAMPTZ DEFAULT NOW()
     )
   `);
-  await pool.query(`CREATE INDEX IF NOT EXISTS idx_proxies_status ON proxies(status)`);
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_proxies_status ON proxies(status)
+  `);
 }
 
-function serializeAccount(a) {
-  return {
-    id: String(a.id),
-    name: String(a.name || a.login || a.id),
-    login: String(a.login || ''),
-    password: String(a.password || ''),
-    niche: a.niche ?? null,
-    proxy: a.proxy ?? null,
-    fingerprint: a.fingerprint ?? null,
-    cookies: a.cookies ?? null,
-    status: a.status || 'new',
-    postsCount: Number(a.postsCount || 0),
-    lastPostAt: a.lastPostAt || null
-  };
-}
-
-function hydrateAccount(row) {
-  return {
-    id: row.id,
-    name: row.name,
-    login: row.login,
-    password: row.password,
-    niche: row.niche ? JSON.parse(row.niche) : null,
-    proxy: row.proxy_json ? JSON.parse(row.proxy_json) : null,
-    fingerprint: row.fingerprint_json ? JSON.parse(row.fingerprint_json) : null,
-    cookies: row.cookies_json || null,
-    status: row.status || 'new',
-    postsCount: Number(row.posts_count || 0),
-    lastPostAt: row.last_post_at || null
-  };
-}
-
-async function saveAccount(account) {
-  const a = serializeAccount(account);
+async function saveAccount(acc) {
   if (!pool) {
-    const all = readJson(ACCOUNTS_FILE, {});
-    all[a.id] = a;
-    writeJson(ACCOUNTS_FILE, all);
-    return a;
+    const file = path.join(__dirname, 'accounts.json');
+    const all = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : {};
+    all[acc.id] = {
+      id: acc.id,
+      name: acc.name,
+      login: acc.login,
+      password: acc.password,
+      niche: acc.niche ? acc.niche.join(',') : null,
+      proxy_json: JSON.stringify(acc.proxy),
+      fingerprint_json: JSON.stringify(acc.fingerprint),
+      cookies_json: acc.cookies ? JSON.stringify(acc.cookies) : null,
+      profile_url: acc.profileUrl || null,
+      status: acc.status,
+      posts_count: acc.postsCount || 0
+    };
+    fs.writeFileSync(file, JSON.stringify(all, null, 2));
+    return;
   }
   await pool.query(`
-    INSERT INTO accounts
-      (id,name,login,password,niche,proxy_json,fingerprint_json,cookies_json,status,posts_count,updated_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,NOW())
+    INSERT INTO accounts (id, name, login, password, niche, proxy_json, fingerprint_json, cookies_json, profile_url, status, posts_count)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
     ON CONFLICT (id) DO UPDATE SET
-      name=EXCLUDED.name, login=EXCLUDED.login, password=EXCLUDED.password,
-      niche=EXCLUDED.niche, proxy_json=EXCLUDED.proxy_json,
-      fingerprint_json=EXCLUDED.fingerprint_json, cookies_json=EXCLUDED.cookies_json,
-      status=EXCLUDED.status, posts_count=EXCLUDED.posts_count, updated_at=NOW()
+      name=EXCLUDED.name,
+      status=EXCLUDED.status,
+      proxy_json=EXCLUDED.proxy_json,
+      fingerprint_json=EXCLUDED.fingerprint_json,
+      cookies_json=EXCLUDED.cookies_json,
+      profile_url=EXCLUDED.profile_url,
+      posts_count=EXCLUDED.posts_count,
+      updated_at=NOW()
   `, [
-    a.id, a.name, a.login, a.password,
-    a.niche ? JSON.stringify(a.niche) : null,
-    a.proxy ? JSON.stringify(a.proxy) : null,
-    a.fingerprint ? JSON.stringify(a.fingerprint) : null,
-    a.cookies, a.status, a.postsCount
+    acc.id, acc.name, acc.login, acc.password,
+    acc.niche ? acc.niche.join(',') : null,
+    JSON.stringify(acc.proxy || null),
+    JSON.stringify(acc.fingerprint || null),
+    acc.cookies ? JSON.stringify(acc.cookies) : null,
+    acc.profileUrl || null,
+    acc.status, acc.postsCount || 0
   ]);
-  return a;
 }
 
-async function loadAllAccounts() {
-  if (!pool) return Object.values(readJson(ACCOUNTS_FILE, {}));
-  const { rows } = await pool.query('SELECT * FROM accounts ORDER BY created_at ASC');
-  return rows.map(hydrateAccount);
-}
-
-async function updateStatus(id, status) {
+async function saveCookies(accId, cookies) {
   if (!pool) {
-    const all = readJson(ACCOUNTS_FILE, {});
-    if (all[id]) {
-      all[id].status = status;
-      writeJson(ACCOUNTS_FILE, all);
-    }
-    return;
-  }
-  await pool.query('UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2', [status, id]);
-}
-
-async function markPosted(id) {
-  if (!pool) {
-    const all = readJson(ACCOUNTS_FILE, {});
-    if (all[id]) {
-      all[id].postsCount = Number(all[id].postsCount || 0) + 1;
-      all[id].lastPostAt = new Date().toISOString();
-      writeJson(ACCOUNTS_FILE, all);
-    }
-    return;
-  }
-  await pool.query(`
-    UPDATE accounts
-    SET posts_count = posts_count + 1, last_post_at = NOW(), updated_at = NOW()
-    WHERE id=$1
-  `, [id]);
-}
-
-async function saveCookies(id, cookies) {
-  if (!pool) {
-    const all = readJson(ACCOUNTS_FILE, {});
-    if (all[id]) {
-      all[id].cookies = cookies || null;
-      writeJson(ACCOUNTS_FILE, all);
+    const file = path.join(__dirname, 'accounts.json');
+    if (!fs.existsSync(file)) return;
+    const all = JSON.parse(fs.readFileSync(file));
+    if (all[accId]) {
+      all[accId].cookies_json = JSON.stringify(cookies);
+      fs.writeFileSync(file, JSON.stringify(all, null, 2));
     }
     return;
   }
   await pool.query(
-    'UPDATE accounts SET cookies_json=$1, updated_at=NOW() WHERE id=$2',
-    [cookies || null, id]
+    `UPDATE accounts SET cookies_json=$1, updated_at=NOW() WHERE id=$2`,
+    [JSON.stringify(cookies), accId]
   );
 }
 
-function serializeProxy(p) {
-  return {
-    id: String(p.id),
-    server: String(p.server),
-    username: p.username || null,
-    password: p.password || null,
-    country: p.country || null,
-    status: p.status || 'free',
-    accountId: p.accountId || null,
-    latency: p.latency ?? null,
-    lastChecked: p.lastChecked || null
-  };
-}
-
-function hydrateProxy(row) {
-  return {
-    id: row.id,
-    server: row.server,
-    username: row.username,
-    password: row.password,
-    country: row.country,
-    status: row.status || 'free',
-    accountId: row.account_id || null,
-    latency: row.latency_ms ?? null,
-    lastChecked: row.last_checked || null
-  };
-}
-
-async function saveProxy(proxy) {
-  const p = serializeProxy(proxy);
+async function loadAllAccounts() {
   if (!pool) {
-    const all = readJson(PROXIES_FILE, {});
+    const file = path.join(__dirname, 'accounts.json');
+    if (!fs.existsSync(file)) return [];
+    const all = JSON.parse(fs.readFileSync(file));
+    return Object.values(all).map(a => ({
+      id: a.id,
+      name: a.name,
+      login: a.login,
+      password: a.password,
+      niche: a.niche ? a.niche.split(',') : null,
+      proxy: a.proxy_json ? JSON.parse(a.proxy_json) : null,
+      fingerprint: a.fingerprint_json ? JSON.parse(a.fingerprint_json) : null,
+      cookies: a.cookies_json ? JSON.parse(a.cookies_json) : null,
+      profileUrl: a.profile_url || null,
+      status: a.status,
+      postsCount: a.posts_count
+    }));
+  }
+  const { rows } = await pool.query('SELECT * FROM accounts ORDER BY created_at ASC');
+  return rows.map(r => ({
+    id: r.id,
+    name: r.name,
+    login: r.login,
+    password: r.password,
+    niche: r.niche ? r.niche.split(',') : null,
+    proxy: r.proxy_json ? JSON.parse(r.proxy_json) : null,
+    fingerprint: r.fingerprint_json ? JSON.parse(r.fingerprint_json) : null,
+    cookies: r.cookies_json ? JSON.parse(r.cookies_json) : null,
+    profileUrl: r.profile_url || null,
+    status: r.status,
+    postsCount: r.posts_count,
+    lastPostAt: r.last_post_at
+  }));
+}
+
+async function updateStatus(accId, status) {
+  if (!pool) {
+    const file = path.join(__dirname, 'accounts.json');
+    if (!fs.existsSync(file)) return;
+    const all = JSON.parse(fs.readFileSync(file));
+    if (all[accId]) {
+      all[accId].status = status;
+      fs.writeFileSync(file, JSON.stringify(all, null, 2));
+    }
+    return;
+  }
+  await pool.query(`UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2`, [status, accId]);
+}
+
+async function markPosted(accId) {
+  if (!pool) {
+    const file = path.join(__dirname, 'accounts.json');
+    if (!fs.existsSync(file)) return;
+    const all = JSON.parse(fs.readFileSync(file));
+    if (all[accId]) {
+      all[accId].posts_count = (all[accId].posts_count || 0) + 1;
+      fs.writeFileSync(file, JSON.stringify(all, null, 2));
+    }
+    return;
+  }
+  await pool.query(
+    `UPDATE accounts SET posts_count = posts_count + 1, last_post_at = NOW() WHERE id=$1`,
+    [accId]
+  );
+}
+
+/* ============================================================
+ *  ПРОКСИ
+ * ============================================================ */
+
+async function saveProxy(p) {
+  if (!pool) {
+    const file = path.join(__dirname, 'proxies.json');
+    const all = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file)) : {};
     all[p.id] = p;
-    writeJson(PROXIES_FILE, all);
-    return p;
+    fs.writeFileSync(file, JSON.stringify(all, null, 2));
+    return;
   }
   await pool.query(`
-    INSERT INTO proxies
-      (id,server,username,password,country,status,account_id,latency_ms,last_checked)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+    INSERT INTO proxies (id, server, username, password, country, status, account_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7)
     ON CONFLICT (id) DO UPDATE SET
-      server=EXCLUDED.server, username=EXCLUDED.username, password=EXCLUDED.password,
-      country=EXCLUDED.country, status=EXCLUDED.status, account_id=EXCLUDED.account_id,
-      latency_ms=EXCLUDED.latency_ms, last_checked=EXCLUDED.last_checked
-  `, [
-    p.id, p.server, p.username, p.password, p.country, p.status,
-    p.accountId, p.latency, p.lastChecked
-  ]);
-  return p;
+      status=EXCLUDED.status,
+      account_id=EXCLUDED.account_id,
+      last_checked=NOW()
+  `, [p.id, p.server, p.username, p.password, p.country, p.status, p.accountId || null]);
 }
 
 async function loadAllProxies() {
-  if (!pool) return Object.values(readJson(PROXIES_FILE, {}));
+  if (!pool) {
+    const file = path.join(__dirname, 'proxies.json');
+    if (!fs.existsSync(file)) return [];
+    return Object.values(JSON.parse(fs.readFileSync(file)));
+  }
   const { rows } = await pool.query('SELECT * FROM proxies ORDER BY created_at ASC');
-  return rows.map(hydrateProxy);
+  return rows.map(r => ({
+    id: r.id,
+    server: r.server,
+    username: r.username,
+    password: r.password,
+    country: r.country,
+    status: r.status,
+    accountId: r.account_id,
+    latencyMs: r.latency_ms
+  }));
 }
 
-async function freeProxy(id) {
-  if (!id) return;
+async function freeProxy() {
   if (!pool) {
-    const all = readJson(PROXIES_FILE, {});
-    if (all[id]) {
-      all[id].status = 'free';
-      all[id].accountId = null;
-      all[id].lastChecked = new Date().toISOString();
-      writeJson(PROXIES_FILE, all);
+    const file = path.join(__dirname, 'proxies.json');
+    if (!fs.existsSync(file)) return null;
+    const all = Object.values(JSON.parse(fs.readFileSync(file)));
+    return all.find(p => p.status === 'free') || null;
+  }
+  const { rows } = await pool.query(
+    `SELECT * FROM proxies WHERE status='free' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED`
+  );
+  if (!rows.length) return null;
+  const r = rows[0];
+  await pool.query(`UPDATE proxies SET status='busy' WHERE id=$1`, [r.id]);
+  return {
+    id: r.id,
+    server: r.server,
+    username: r.username,
+    password: r.password,
+    country: r.country,
+    status: 'busy'
+  };
+}
+
+async function releaseProxy(id) {
+  if (!pool) return;
+  await pool.query(`UPDATE proxies SET status='free', account_id=NULL WHERE id=$1`, [id]);
+}
+
+async function acquireProxyAtomic(accountId, country = null) {
+  if (!pool) {
+    const file = path.join(__dirname, 'proxies.json');
+    if (!fs.existsSync(file)) return null;
+    const all = JSON.parse(fs.readFileSync(file));
+    const list = Object.values(all);
+    const candidate = list.find(p =>
+      p.status === 'free' &&
+      (!country || p.country === country)
+    ) || list.find(p => p.status === 'free');
+
+    if (!candidate) return null;
+    candidate.status = 'busy';
+    candidate.accountId = accountId;
+    all[candidate.id] = candidate;
+    fs.writeFileSync(file, JSON.stringify(all, null, 2));
+    return candidate;
+  }
+
+  const query = country
+    ? `SELECT * FROM proxies WHERE status='free' AND country=$1
+       ORDER BY last_checked ASC NULLS FIRST
+       LIMIT 1 FOR UPDATE SKIP LOCKED`
+    : `SELECT * FROM proxies WHERE status='free'
+       ORDER BY last_checked ASC NULLS FIRST
+       LIMIT 1 FOR UPDATE SKIP LOCKED`;
+
+  const params = country ? [country] : [];
+  const { rows } = await pool.query(query, params);
+
+  if (!rows.length) {
+    const { rows: fallback } = await pool.query(
+      `SELECT * FROM proxies WHERE status='free'
+       ORDER BY last_checked ASC NULLS FIRST
+       LIMIT 1 FOR UPDATE SKIP LOCKED`
+    );
+    if (!fallback.length) return null;
+    const p = fallback[0];
+    await pool.query(
+      `UPDATE proxies SET status='busy', account_id=$1 WHERE id=$2`,
+      [accountId, p.id]
+    );
+    return {
+      id: p.id, server: p.server, username: p.username,
+      password: p.password, country: p.country, status: 'busy'
+    };
+  }
+
+  const p = rows[0];
+  await pool.query(
+    `UPDATE proxies SET status='busy', account_id=$1 WHERE id=$2`,
+    [accountId, p.id]
+  );
+  return {
+    id: p.id, server: p.server, username: p.username,
+    password: p.password, country: p.country, status: 'busy'
+  };
+}
+
+async function releaseProxyAtomic(proxyId) {
+  if (!pool) {
+    const file = path.join(__dirname, 'proxies.json');
+    if (!fs.existsSync(file)) return;
+    const all = JSON.parse(fs.readFileSync(file));
+    if (all[proxyId]) {
+      all[proxyId].status = 'free';
+      all[proxyId].accountId = null;
+      all[proxyId].last_checked = new Date().toISOString();
+      fs.writeFileSync(file, JSON.stringify(all, null, 2));
     }
     return;
   }
   await pool.query(
     `UPDATE proxies SET status='free', account_id=NULL, last_checked=NOW() WHERE id=$1`,
-    [id]
+    [proxyId]
   );
-}
-
-async function releaseProxy(id) {
-  return freeProxy(id);
-}
-
-async function acquireProxyAtomic(accountId, country = null) {
-  if (!pool) {
-    const all = readJson(PROXIES_FILE, {});
-    const list = Object.values(all);
-    const candidate = list.find(p =>
-      p.status === 'free' &&
-      (!country || String(p.country || '').toLowerCase() === String(country).toLowerCase())
-    ) || list.find(p => p.status === 'free');
-    if (!candidate) return null;
-    candidate.status = 'busy';
-    candidate.accountId = accountId;
-    all[candidate.id] = candidate;
-    writeJson(PROXIES_FILE, all);
-    return candidate;
-  }
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    let sql = `SELECT * FROM proxies WHERE status='free'`;
-    const params = [];
-    if (country) {
-      sql += ` AND country=$1`;
-      params.push(country);
-    }
-    sql += ` ORDER BY last_checked ASC NULLS FIRST LIMIT 1 FOR UPDATE SKIP LOCKED`;
-    let { rows } = await client.query(sql, params);
-
-    if (!rows.length && country) {
-      ({ rows } = await client.query(
-        `SELECT * FROM proxies WHERE status='free'
-         ORDER BY last_checked ASC NULLS FIRST LIMIT 1 FOR UPDATE SKIP LOCKED`
-      ));
-    }
-    if (!rows.length) {
-      await client.query('ROLLBACK');
-      return null;
-    }
-    const p = rows[0];
-    await client.query(
-      `UPDATE proxies SET status='busy', account_id=$1 WHERE id=$2`,
-      [accountId, p.id]
-    );
-    await client.query('COMMIT');
-    return hydrateProxy({ ...p, status: 'busy', account_id: accountId });
-  } catch (e) {
-    try { await client.query('ROLLBACK'); } catch {}
-    throw e;
-  } finally {
-    client.release();
-  }
-}
-
-async function releaseProxyAtomic(proxyId) {
-  return freeProxy(proxyId);
 }
 
 async function proxyStats() {
   if (!pool) {
-    const list = Object.values(readJson(PROXIES_FILE, {}));
+    const file = path.join(__dirname, 'proxies.json');
+    if (!fs.existsSync(file)) return { total: 0, free: 0, busy: 0, dead: 0 };
+    const list = Object.values(JSON.parse(fs.readFileSync(file)));
     return {
       total: list.length,
       free: list.filter(p => p.status === 'free').length,
@@ -338,7 +348,9 @@ async function proxyStats() {
       dead: list.filter(p => p.status === 'dead').length
     };
   }
-  const { rows } = await pool.query(`SELECT status, COUNT(*)::int AS count FROM proxies GROUP BY status`);
+  const { rows } = await pool.query(`
+    SELECT status, COUNT(*)::int as count FROM proxies GROUP BY status
+  `);
   const result = { total: 0, free: 0, busy: 0, dead: 0 };
   for (const r of rows) {
     result[r.status] = r.count;
@@ -347,9 +359,43 @@ async function proxyStats() {
   return result;
 }
 
+/* ============================================================
+ *  УДАЛЕНИЕ ВСЕГО
+ * ============================================================ */
+
+async function deleteAllAccounts() {
+  if (!pool) {
+    const file = path.join(__dirname, 'accounts.json');
+    if (fs.existsSync(file)) fs.writeFileSync(file, '{}');
+    const pfile = path.join(__dirname, 'proxies.json');
+    if (fs.existsSync(pfile)) {
+      const all = JSON.parse(fs.readFileSync(pfile));
+      for (const id of Object.keys(all)) {
+        all[id].status = 'free';
+        all[id].accountId = null;
+      }
+      fs.writeFileSync(pfile, JSON.stringify(all, null, 2));
+    }
+    return;
+  }
+  await pool.query('DELETE FROM accounts');
+  await pool.query(`UPDATE proxies SET status='free', account_id=NULL`);
+}
+
 module.exports = {
-  initDB, migrate,
-  saveAccount, loadAllAccounts, updateStatus, markPosted, saveCookies,
-  saveProxy, loadAllProxies, freeProxy, releaseProxy,
-  acquireProxyAtomic, releaseProxyAtomic, proxyStats
+  initDB,
+  migrate,
+  saveAccount,
+  loadAllAccounts,
+  updateStatus,
+  markPosted,
+  saveCookies,
+  saveProxy,
+  loadAllProxies,
+  freeProxy,
+  releaseProxy,
+  acquireProxyAtomic,
+  releaseProxyAtomic,
+  proxyStats,
+  deleteAllAccounts
 };
