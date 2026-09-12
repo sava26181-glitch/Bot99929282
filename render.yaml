@@ -1,28 +1,10 @@
 services:
   - type: worker
-    name: zenodrop-tiktok-farm
+    name: zenodrop-farm
     runtime: docker
     dockerfilePath: ./Dockerfile
     envVars:
       - key: BOT_TOKEN
         sync: false
-      - key: CAPTCHA_API_KEY
-        sync: false
       - key: DATABASE_URL
         sync: false
-      - key: GLOBAL_BIO
-        value: "депать последние деньги только тут\n👉 zenodrop.fun\n👉тгк: zenodrp"
-      - key: INSERT_AT_SECONDS
-        value: "5"
-      - key: BANNER_DURATION
-        value: "4"
-      - key: MAX_VIDEO_MB
-        value: "49"
-      - key: HEADLESS
-        value: "true"
-
-databases:
-  - name: zenodrop-db
-    plan: free
-    databaseName: zenodrop
-    user: zenodrop
