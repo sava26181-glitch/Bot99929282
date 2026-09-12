@@ -1,7 +1,6 @@
 const crypto = require('crypto');
 const https = require('https');
 const fs = require('fs');
-const path = require('path');
 const { signTikTokRequest } = require('./signer_bridge');
 
 const MOBILE_API_HOST = 'api16-normal-c-useast1a.tiktokv.com';
@@ -207,8 +206,10 @@ class TikTokMobile {
     const allParams = { ...this.baseParams(), ...params };
     const sig = await signTikTokRequest(allParams, payload, { version: 8404 });
     const headers = this.headersFor(sig);
+
     const body = new URLSearchParams(allParams).toString();
     const url = `https://${MOBILE_API_HOST}${pathname}?${body}`;
+
     const res = await httpRequest(url, { method: payload ? 'POST' : 'GET', headers }, payload);
     return res.data;
   }
