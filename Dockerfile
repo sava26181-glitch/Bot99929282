@@ -1,9 +1,9 @@
 
 FROM node:19-slim
 
-WORKDIR /app
-
 USER root
+
+WORKDIR /app
 
 RUN apt-get update -o Acquire::Retries=3 && \
     apt-get install -y --no-install-recommends --fix-missing \
