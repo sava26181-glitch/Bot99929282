@@ -10,8 +10,14 @@ function initDB() {
   }
   try {
     const { Pool } = require('pg');
+    const url = new URL(process.env.DATABASE_URL);
+
     pool = new Pool({
-      connectionString: process.env.DATABASE_URL,
+      host: url.hostname,
+      port: parseInt(url.port || '5432'),
+      user: decodeURIComponent(url.username),
+      password: decodeURIComponent(url.password),
+      database: url.pathname.replace(/^\//, ''),
       ssl: { rejectUnauthorized: false },
       max: 20
     });
