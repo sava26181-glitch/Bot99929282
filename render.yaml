@@ -1,6 +1,6 @@
 services:
   - type: worker
-    name: zenodrop-banner-bot
+    name: zenodrop-tiktok-bot
     runtime: docker
     dockerfilePath: ./Dockerfile
     envVars:
@@ -12,3 +12,5 @@ services:
         value: "4"
       - key: MAX_VIDEO_MB
         value: "49"
+      - key: HEADLESS
+        value: "true"
