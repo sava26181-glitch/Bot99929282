@@ -114,9 +114,25 @@ function zenodropNickname(seq) {
   return `zenodrop_${String(seq).padStart(4, '0')}`;
 }
 
-async function createOneAccount({ seq, nickname, niche, log = () => {} }) {
+/**
+ * После успешной регистрации получаем уникальный ID пользователя
+ * и собираем ссылку на профиль вида https://www.tiktok.com/@username
+ */
+async function resolveProfileUrl(api, username) {
+  // Сначала пробуем через уникальный юзернейм
+  if (username) {
+    return `https://www.tiktok.com/@${username}`;
+  }
+  return null;
+}
+
+async function createOneAccount({ seq, nickname, niche, log = () => {}, shouldStop = () => false }) {
   const id = crypto.randomUUID().slice(0, 12);
   const nick = nickname || zenodropNickname(seq);
+
+  if (shouldStop()) {
+    return { success: false, reason: 'stopped', seq };
+  }
 
   let proxy = null;
   try {
@@ -161,6 +177,8 @@ async function createOneAccount({ seq, nickname, niche, log = () => {} }) {
 
     log(`[#${seq}] ${mailer.email} | device=${api.deviceId}`);
 
+    if (shouldStop()) throw new Error('stopped');
+
     const signupResult = await api.signup(mailer.email, password, nick, birthDate);
 
     if (signupResult.captcha) {
@@ -171,6 +189,7 @@ async function createOneAccount({ seq, nickname, niche, log = () => {} }) {
       log(`[#${seq}] ждём код...`);
       let code = null;
       for (let i = 0; i < 20 && !code; i++) {
+        if (shouldStop()) throw new Error('stopped');
         await new Promise(r => setTimeout(r, 3000));
         try {
           const messages = await mailer.getMessages();
@@ -188,7 +207,9 @@ async function createOneAccount({ seq, nickname, niche, log = () => {} }) {
       if (sub.error) throw new Error(`code_submit: ${sub.error}`);
     }
 
+    // Устанавливаем ник и получаем ссылку на профиль
     await api.setNickname(nick).catch(e => log(`[#${seq}] nick: ${e.message}`));
+    const profileUrl = await resolveProfileUrl(api, nick);
 
     const avatarPath = path.join(__dirname, 'avatar.png');
     if (fs.existsSync(avatarPath)) {
@@ -209,12 +230,13 @@ async function createOneAccount({ seq, nickname, niche, log = () => {} }) {
       proxy,
       fingerprint,
       cookies,
+      profileUrl,
       status: 'ready',
       postsCount: 0
     };
     await store.saveAccount(acc);
 
-    log(`[#${seq}] OK → ${mailer.email}`);
+    log(`[#${seq}] OK → ${mailer.email} | ${profileUrl}`);
     return { success: true, account: acc, seq };
   } catch (e) {
     log(`[#${seq}] FAIL: ${e.message}`);
@@ -232,19 +254,21 @@ async function createBatch({
   niche,
   startSeq = 1,
   log = console.log,
-  onProgress = null
+  onProgress = null,
+  shouldStop = () => false
 }) {
-  const results = { ok: [], fail: [], total: count, started: Date.now() };
+  const results = { ok: [], fail: [], total: count, started: Date.now(), stopped: false };
   const queue = Array.from({ length: count }, (_, i) => startSeq + i);
   let inFlight = 0;
 
   async function worker(workerId) {
     while (queue.length) {
+      if (shouldStop()) { results.stopped = true; return; }
       const seq = queue.shift();
       if (seq === undefined) return;
 
       inFlight++;
-      const r = await createOneAccount({ seq, niche, log });
+      const r = await createOneAccount({ seq, niche, log, shouldStop });
       inFlight--;
 
       if (r.success) results.ok.push(r.account);
