@@ -5,10 +5,11 @@ const os = require("os");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
 const https = require("https");
+const http = require("http");
 
-const TikTokUploader = require("./tiktok_uploader");
+const TikTokMobile = require("./tiktok_uploader");
 const { buildHashtags, refreshTrending, BRAND_TAG, DEFAULT_BIO } = require("./tiktok_uploader");
-const { TikTokWarmer } = require("./warmer");
+const { TikTokMobileWarmer } = require("./warmer");
 const { generateFingerprint } = require("./fingerprint");
 const proxyMgr = require("./proxy_manager");
 const factory = require("./account_factory");
@@ -25,7 +26,7 @@ if (!TOKEN) { console.error("BOT_TOKEN is not set"); process.exit(1); }
 const DEFAULT_INSERT = Number(process.env.INSERT_AT_SECONDS || 5);
 const DEFAULT_DURATION = Number(process.env.BANNER_DURATION || 4);
 const MAX_MB = Number(process.env.MAX_VIDEO_MB || 49);
-const HEADLESS = String(process.env.HEADLESS || "true") !== "false";
+const PORT = process.env.PORT || 3000;
 
 const ROOT = __dirname;
 const BANNER = path.join(ROOT, "banner.mp4");
@@ -44,6 +45,39 @@ const accounts = new Map();
 const factoryJobs = new Map();
 const avatarWaiting = new Map();
 const bioWaiting = new Map();
+
+/* ============================================================
+ *  HTTP-СЕРВЕР ДЛЯ RENDER HEALTH CHECK
+ * ============================================================ */
+
+const server = http.createServer((req, res) => {
+  if (req.url === '/health' || req.url === '/') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      status: 'ok',
+      accounts: accounts.size,
+      uptime: Math.floor(process.uptime()),
+      ts: Date.now()
+    }));
+  } else {
+    res.writeHead(404);
+    res.end();
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`[health] listening on port ${PORT}`);
+});
+
+/* Self-ping каждые 12 минут — чтобы Render Free не засыпал */
+if (process.env.RENDER) {
+  setInterval(() => {
+    const hostname = process.env.RENDER_EXTERNAL_HOSTNAME;
+    if (!hostname) return;
+    https.get(`https://${hostname}/health`, () => {}).on('error', () => {});
+  }, 12 * 60 * 1000);
+  console.log('[self-ping] enabled for Render');
+}
 
 /* ============================================================
  *  УТИЛИТЫ
@@ -264,7 +298,6 @@ function mainMenuKeyboard() {
       [{ text: "📝 Био на все", callback_data: "set_bio_all" }],
       [{ text: "🌐 Прокси", callback_data: "proxies" }],
       [{ text: "🏷 Сменить ник", callback_data: "change_nick" }],
-      [{ text: "🔑 2captcha баланс", callback_data: "captcha_balance" }],
       [{ text: "📊 Статус", callback_data: "status" }]
     ]
   };
@@ -301,12 +334,12 @@ function showSettings(chatId) {
   try {
     const list = await store.loadAllAccounts();
     for (const a of list) {
-      a.uploader = new TikTokUploader({
+      a.uploader = new TikTokMobile({
+        deviceId: a.fingerprint?.deviceId || null,
         proxy: a.proxy,
         fingerprint: a.fingerprint,
         cookies: a.cookies,
         accountId: a.id,
-        headless: HEADLESS,
         onCookies: async (cks) => { await store.saveCookies(a.id, cks); }
       });
       accounts.set(a.id, a);
@@ -326,7 +359,7 @@ function showSettings(chatId) {
 
 bot.onText(/^\/start$/, msg => {
   bot.sendMessage(msg.chat.id,
-    "🤖 *Zenodrop TikTok Farm v6*\n\n" +
+    "🤖 *Zenodrop TikTok Farm*\n\n" +
     "• /menu — меню\n" +
     "• Отправь видео или ссылку TikTok — обработка\n" +
     "• Отправь `login:password:name:tag1,tag2` — добавить аккаунт вручную",
@@ -338,7 +371,7 @@ bot.onText(/^\/menu$/, msg => {
 });
 
 /* ============================================================
- *  ОБРАБОТКА ВИДЕО
+ *  ВИДЕО
  * ============================================================ */
 
 bot.on("video", async msg => {
@@ -447,7 +480,6 @@ bot.on("message", async msg => {
   const text = (msg.text || "").trim();
   if (!text || text.startsWith("/")) return;
 
-  // Био
   if (bioWaiting.get(chatId)) {
     bioWaiting.delete(chatId);
     const bio = text === '-' ? DEFAULT_BIO : text;
@@ -456,7 +488,6 @@ bot.on("message", async msg => {
     return;
   }
 
-  // Состояния фабрики
   const job = factoryJobs.get(chatId);
   if (job && job.waiting) {
     if (job.waiting === "count") {
@@ -497,7 +528,6 @@ bot.on("message", async msg => {
 
   if (isUrl(text)) return bot.sendMessage(chatId, "❌ Только TikTok ссылки.");
 
-  // Добавление аккаунта вручную
   const accMatch = text.match(/^([^:]+):([^:]+):([^:]+)(?::(.+))?$/);
   if (accMatch && !sessions.get(chatId)) {
     const [, login, password, name, nicheStr] = accMatch;
@@ -509,14 +539,15 @@ bot.on("message", async msg => {
       niche: nicheStr ? nicheStr.split(',').map(s => s.trim().toLowerCase()) : null,
       proxy, fingerprint, cookies: null, status: "new", postsCount: 0
     };
-    acc.uploader = new TikTokUploader({
-      proxy, fingerprint, accountId: id, headless: HEADLESS,
+    acc.uploader = new TikTokMobile({
+      deviceId: fingerprint?.deviceId || null,
+      proxy, fingerprint, accountId: id,
       onCookies: async (cks) => { await store.saveCookies(id, cks); }
     });
     accounts.set(id, acc);
     await store.saveAccount(acc);
     return bot.sendMessage(chatId,
-      `✅ Аккаунт "${acc.name}" добавлен.\nID: \`${id}\`\nПрокси: ${proxy ? proxy.server : 'нет (free)'}`,
+      `✅ Аккаунт "${acc.name}" добавлен.\nID: \`${id}\``,
       { parse_mode: "Markdown" });
   }
 
@@ -564,7 +595,7 @@ bot.on("message", async msg => {
 });
 
 /* ============================================================
- *  CALLBACK QUERY
+ *  CALLBACK
  * ============================================================ */
 
 bot.on("callback_query", async q => {
@@ -575,7 +606,7 @@ bot.on("callback_query", async q => {
   if (data === "add_account") {
     await bot.answerCallbackQuery(q.id);
     return bot.sendMessage(chatId,
-      "➕ `login:password:name:tag1,tag2`\n\nПример:\n`user@mail.com:pass123:myacc:dropshipping,ecommerce`",
+      "➕ `login:password:name:tag1,tag2`",
       { parse_mode: "Markdown" });
   }
 
@@ -585,11 +616,7 @@ bot.on("callback_query", async q => {
     let txt = `📋 *Аккаунты (${accounts.size}):*\n\n`;
     let i = 1;
     for (const [id, acc] of accounts) {
-      txt += `${i++}. *${acc.name}* (\`${id}\`)\n`;
-      txt += `   ${acc.login} | ${acc.status}\n`;
-      if (acc.proxy) txt += `   🌐 ${acc.proxy.server}\n`;
-      if (acc.niche) txt += `   🏷 ${acc.niche.join(', ')}\n`;
-      txt += `\n`;
+      txt += `${i++}. *${acc.name}* (\`${id}\`)\n   ${acc.login} | ${acc.status}\n\n`;
       if (i > 30) { txt += `... и ещё ${accounts.size - 30}\n`; break; }
     }
     return bot.sendMessage(chatId, txt, { parse_mode: "Markdown" });
@@ -597,53 +624,33 @@ bot.on("callback_query", async q => {
 
   if (data === "status") {
     await bot.answerCallbackQuery(q.id);
-    const proxies = await store.loadAllProxies();
-    const free = proxies.filter(p => p.status === 'free').length;
-    const busy = proxies.filter(p => p.status === 'busy').length;
+    const stats = await store.proxyStats();
     let txt = `📊 *Статус*\n\nАккаунтов: ${accounts.size}\nСессий: ${sessions.size}\n\n`;
-    txt += `Прокси: всего ${proxies.length}\n🟢 free: ${free}\n🔴 busy: ${busy}\n\n`;
-    const stats = {};
-    for (const acc of accounts.values()) stats[acc.status] = (stats[acc.status] || 0) + 1;
-    for (const [st, cnt] of Object.entries(stats)) txt += `${st}: ${cnt}\n`;
+    txt += `Прокси: всего ${stats.total}\n🟢 free: ${stats.free}\n🔴 busy: ${stats.busy}\n💀 dead: ${stats.dead}\n\n`;
+    const accStats = {};
+    for (const acc of accounts.values()) accStats[acc.status] = (accStats[acc.status] || 0) + 1;
+    for (const [st, cnt] of Object.entries(accStats)) txt += `${st}: ${cnt}\n`;
     return bot.sendMessage(chatId, txt, { parse_mode: "Markdown" });
-  }
-
-  if (data === "captcha_balance") {
-    await bot.answerCallbackQuery(q.id);
-    try {
-      const bal = await captchaSolver.getBalance();
-      return bot.sendMessage(chatId, bal === null
-        ? "❌ CAPTCHA_API_KEY не задан или неверный."
-        : `💰 Баланс 2captcha: ${bal} USD`);
-    } catch (e) {
-      return bot.sendMessage(chatId, `❌ ${e.message}`);
-    }
   }
 
   if (data === "set_avatar_all") {
     await bot.answerCallbackQuery(q.id);
     if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
     avatarWaiting.set(chatId, true);
-    return bot.sendMessage(chatId,
-      "🖼 Отправь изображение (как фото или файлом). Я поставлю его на все " +
-      `${accounts.size} аккаунтов.`);
+    return bot.sendMessage(chatId, "🖼 Отправь изображение.");
   }
 
   if (data === "set_bio_all") {
     await bot.answerCallbackQuery(q.id);
     if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
     bioWaiting.set(chatId, true);
-    return bot.sendMessage(chatId,
-      `📝 Отправь текст био. Дефолтный:\n\n${DEFAULT_BIO}\n\n` +
-      "Отправь `-` чтобы использовать дефолтный.");
+    return bot.sendMessage(chatId, `📝 Отправь текст био. Дефолт:\n\n${DEFAULT_BIO}\n\nИли \`-\` для дефолта.`);
   }
 
   if (data === "factory") {
     await bot.answerCallbackQuery(q.id);
     factoryJobs.set(chatId, { waiting: "count" });
-    return bot.sendMessage(chatId,
-      "🏭 *Массовое создание аккаунтов*\n\nСколько аккаунтов создать? (1..100)",
-      { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, "🏭 Сколько аккаунтов создать? (1..100)");
   }
 
   if (data === "proxies") {
@@ -653,14 +660,12 @@ bot.on("callback_query", async q => {
     const busy = list.filter(p => p.status === 'busy').length;
     return bot.sendMessage(chatId,
       `🌐 *Прокси*\n\nВсего: ${list.length}\n🟢 free: ${free}\n🔴 busy: ${busy}\n\n` +
-      `Отправь список прокси одним сообщением, каждый с новой строки:\n\n` +
-      "`scheme://user:pass@host:port`\n`host:port:user:pass`\n`host:port`",
+      `Отправь список прокси одним сообщением.`,
       {
         parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
-            [{ text: "📥 Проверить все", callback_data: "proxy_check" }],
-            [{ text: "🗑 Очистить", callback_data: "proxy_clear" }]
+            [{ text: "📥 Проверить все", callback_data: "proxy_check" }]
           ]
         }
       });
@@ -674,17 +679,9 @@ bot.on("callback_query", async q => {
     for (const p of list) {
       const r = await proxyMgr.checkProxy(p);
       if (r.ok) ok++;
-      else {
-        fail++;
-        await store.saveProxy({ ...p, status: 'dead' });
-      }
+      else { fail++; await store.saveProxy({ ...p, status: 'dead' }); }
     }
     return bot.sendMessage(chatId, `✅ Живых: ${ok}\n❌ Мёртвых: ${fail}`);
-  }
-
-  if (data === "proxy_clear") {
-    await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId, "⚠️ Очистка не реализована — удаляй строки напрямую в БД.");
   }
 
   if (data === "change_nick") {
@@ -703,9 +700,7 @@ bot.on("callback_query", async q => {
     accounts.forEach(a => a.__waitNick = false);
     const acc = accounts.get(id);
     if (acc) acc.__waitNick = true;
-    return bot.sendMessage(chatId,
-      `🏷 Введи новый ник для *${acc?.name}*:\n\nРекомендую: \`zenodrop_XXXX\``,
-      { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, `🏷 Введи новый ник для *${acc?.name}*:`, { parse_mode: "Markdown" });
   }
 
   if (data === "warm_all") {
@@ -725,7 +720,7 @@ bot.on("callback_query", async q => {
     const acc = accounts.get(id);
     if (!acc) return bot.sendMessage(chatId, "❌ Нет.");
     const tags = buildHashtags({ niche: acc.niche || undefined });
-    return bot.sendMessage(chatId, `🏷 *${acc.name}*\n\n${tags.join(' ')}\n\nВсего: ${tags.length}`, { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, `🏷 *${acc.name}*\n\n${tags.join(' ')}`, { parse_mode: "Markdown" });
   }
 
   if (!s) return bot.answerCallbackQuery(q.id, { text: "Сначала видео." });
@@ -733,12 +728,12 @@ bot.on("callback_query", async q => {
   if (data === "time") {
     s.waiting = "time";
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId, "⏱ На какой секунде вставить баннер?");
+    return bot.sendMessage(chatId, "⏱ На какой секунде?");
   }
   if (data === "duration") {
     s.waiting = "duration";
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId, "⏳ Длительность баннера в секундах?");
+    return bot.sendMessage(chatId, "⏳ Длительность в секундах?");
   }
   if (/^count[123]$/.test(data)) {
     s.count = Number(data.slice(-1));
@@ -784,19 +779,16 @@ bot.on("message", async msg => {
       acc.__waitNick = false;
       await bot.sendMessage(chatId, `🏷 Меняю ник на "${text}"...`);
       try {
-        await acc.uploader.init();
         const r = await acc.uploader.setNickname(text);
-        if (r.success) {
+        if (r && !r.error) {
           acc.name = text;
           await store.saveAccount(acc);
-          await bot.sendMessage(chatId, `✅ Ник изменён на "${text}"`);
+          await bot.sendMessage(chatId, `✅ Ник изменён.`);
         } else {
-          await bot.sendMessage(chatId, `❌ ${r.error || 'не удалось'}`);
+          await bot.sendMessage(chatId, `❌ ${r?.error || 'failed'}`);
         }
       } catch (e) {
         await bot.sendMessage(chatId, `❌ ${e.message}`);
-      } finally {
-        await acc.uploader.close();
       }
       return;
     }
@@ -814,53 +806,32 @@ async function startFactory(chatId, job) {
   const stats = await store.proxyStats();
   await bot.sendMessage(chatId,
     `🏭 *Фабрика запущена*\n\n` +
-    `Аккаунтов: ${count}\n` +
-    `Ниша: ${niche ? niche.join(', ') : 'общая'}\n` +
+    `Аккаунтов: ${count}\nНиша: ${niche ? niche.join(', ') : 'общая'}\n` +
     `Прокси: ${stats.free} free / ${stats.total} всего\n` +
-    `Параллельность: 10\n\n` +
-    `Ожидаемое время: ~${Math.ceil(count / 10 * 1.5)} мин`,
+    `Параллельность: 10\nОжидаемое время: ~${Math.ceil(count / 10 * 1.5)} мин`,
     { parse_mode: "Markdown" });
 
-  if (stats.free < 5) {
-    await bot.sendMessage(chatId,
-      `⚠️ Свободных прокси мало (${stats.free}). ` +
-      `TikTok будет банить. Рекомендую залить ещё прокси.`);
-  }
-
   let lastUpdate = 0;
-
   try {
     const r = await factory.createBatch({
-      count,
-      concurrency: 10,
-      niche,
-      startSeq: 1,
+      count, concurrency: 10, niche, startSeq: 1,
       log: (m) => console.log(m),
       onProgress: async ({ done, total, ok, fail, inFlight, elapsed }) => {
-        // Обновляем не чаще чем раз в 30 секунд
         if (Date.now() - lastUpdate < 30000) return;
         lastUpdate = Date.now();
-
         const pct = Math.floor(done / total * 100);
         const bar = '█'.repeat(Math.floor(pct / 5)) + '░'.repeat(20 - Math.floor(pct / 5));
-
         await bot.sendMessage(chatId,
-          `🏭 *Прогресс*\n\n${bar} ${pct}%\n\n` +
-          `✅ OK: ${ok}\n❌ Fail: ${fail}\n` +
-          `🔄 В работе: ${inFlight}\n` +
-          `⏱ Прошло: ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`,
+          `🏭 *Прогресс*\n\n${bar} ${pct}%\n\n✅ OK: ${ok}\n❌ Fail: ${fail}\n🔄 В работе: ${inFlight}\n⏱ ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`,
           { parse_mode: "Markdown" }).catch(() => {});
       }
     });
 
-    // Загружаем созданные в память
     for (const acc of r.ok) {
       acc.uploader = new TikTokMobile({
         deviceId: acc.fingerprint?.deviceId || null,
-        proxy: acc.proxy,
-        fingerprint: acc.fingerprint,
-        cookies: acc.cookies,
-        accountId: acc.id,
+        proxy: acc.proxy, fingerprint: acc.fingerprint,
+        cookies: acc.cookies, accountId: acc.id,
         onCookies: async (cks) => { await store.saveCookies(acc.id, cks); }
       });
       accounts.set(acc.id, acc);
@@ -868,50 +839,12 @@ async function startFactory(chatId, job) {
 
     const min = Math.floor(r.elapsed / 60);
     const sec = r.elapsed % 60;
-
     await bot.sendMessage(chatId,
-      `✅ *Фабрика завершена*\n\n` +
-      `Создано: ${r.ok.length}\n` +
-      `Ошибок: ${r.fail.length}\n` +
-      `Время: ${min} мин ${sec} сек\n` +
-      `Скорость: ${(count / (r.elapsed / 60)).toFixed(1)} акк/мин\n\n` +
-      (r.fail.length
-        ? `*Причины ошибок:*\n` +
-          Object.entries(
-            r.fail.reduce((acc, f) => {
-              acc[f.reason] = (acc[f.reason] || 0) + 1;
-              return acc;
-            }, {})
-          ).sort((a, b) => b[1] - a[1]).slice(0, 5)
-            .map(([k, v]) => `• ${k}: ${v}`).join('\n')
-        : ''),
+      `✅ *Фабрика завершена*\n\nСоздано: ${r.ok.length}\nОшибок: ${r.fail.length}\nВремя: ${min}м ${sec}с\nСкорость: ${(count / (r.elapsed / 60)).toFixed(1)} акк/мин\n\n` +
+      (r.fail.length ? `*Причины:*\n` + Object.entries(r.fail.reduce((a, f) => { a[f.reason] = (a[f.reason] || 0) + 1; return a; }, {})).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `• ${k}: ${v}`).join('\n') : ''),
       { parse_mode: "Markdown" });
-
   } catch (e) {
     console.error('factory error:', e);
-    await bot.sendMessage(chatId, `❌ Фабрика упала: ${e.message}`);
-  }
-}
-      }
-    });
-
-    for (const acc of r.ok) {
-      acc.uploader = new TikTokUploader({
-        proxy: acc.proxy,
-        fingerprint: acc.fingerprint,
-        cookies: acc.cookies,
-        accountId: acc.id,
-        headless: HEADLESS,
-        onCookies: async (cks) => { await store.saveCookies(acc.id, cks); }
-      });
-      accounts.set(acc.id, acc);
-    }
-
-    await bot.sendMessage(chatId,
-      `✅ Создано: ${r.ok.length}\n❌ Ошибок: ${r.fail.length}\n\n` +
-      (r.fail.length ? `Причины:\n${r.fail.slice(0, 10).map(f => `#${f.seq}: ${f.reason}`).join('\n')}` : ''));
-  } catch (e) {
-    console.error(e);
     await bot.sendMessage(chatId, `❌ Фабрика упала: ${e.message}`);
   }
 }
@@ -923,24 +856,12 @@ async function startFactory(chatId, job) {
 async function startWarm(chatId, id) {
   const acc = accounts.get(id);
   if (!acc) return bot.sendMessage(chatId, "❌ Нет аккаунта.");
-
   acc.status = "warming";
   await store.updateStatus(id, "warming");
   await bot.sendMessage(chatId, `🔥 Прогрев ${acc.name}...`);
-
   try {
-    await acc.uploader.init();
-    if (!acc.cookies) {
-      const r = await acc.uploader.login(acc.login, acc.password);
-      if (r.captcha) {
-        acc.status = "captcha";
-        await store.updateStatus(id, "captcha");
-        return bot.sendMessage(chatId, `⚠️ Капча у ${acc.name}`);
-      }
-    }
-    const warmer = new TikTokWarmer(acc.uploader);
+    const warmer = new TikTokMobileWarmer(acc.uploader);
     await warmer.warmAccount(3, 20);
-
     acc.status = "warmed";
     await store.updateStatus(id, "warmed");
     await bot.sendMessage(chatId, `✅ ${acc.name} прогрет!`);
@@ -948,14 +869,12 @@ async function startWarm(chatId, id) {
     acc.status = "error";
     await store.updateStatus(id, "error");
     await bot.sendMessage(chatId, `❌ ${acc.name}: ${e.message}`);
-  } finally {
-    await acc.uploader.close();
   }
 }
 
 async function startWarmAll(chatId) {
   if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
-  await bot.sendMessage(chatId, `🔥 Прогреваю ${accounts.size} аккаунтов последовательно...`);
+  await bot.sendMessage(chatId, `🔥 Прогреваю ${accounts.size} последовательно...`);
   let done = 0;
   for (const [id, acc] of accounts) {
     if (acc.status === 'warming') continue;
@@ -976,20 +895,10 @@ async function applyAvatarAll(chatId, imagePath) {
   for (const [id, acc] of accounts) {
     done++;
     try {
-      await acc.uploader.init();
-      if (!acc.cookies) {
-        const r = await acc.uploader.login(acc.login, acc.password);
-        if (r.captcha) { fail++; await bot.sendMessage(chatId, `⚠️ ${acc.name}: капча`).catch(() => {}); continue; }
-      }
       const r = await acc.uploader.setAvatar(imagePath);
-      if (r.success) ok++;
-      else { fail++; console.error(`avatar ${acc.name}: ${r.error}`); }
-      await acc.uploader.close();
-    } catch (e) {
-      fail++;
-      console.error(`avatar ${acc.name} error: ${e.message}`);
-      try { await acc.uploader.close(); } catch {}
-    }
+      if (r && !r.error) ok++;
+      else fail++;
+    } catch (e) { fail++; }
     if (done % 5 === 0 || done === accounts.size) {
       await bot.sendMessage(chatId, `🖼 ${done}/${accounts.size} (✅${ok} ❌${fail})`).catch(() => {});
     }
@@ -1003,20 +912,10 @@ async function applyBioAll(chatId, bioText) {
   for (const [id, acc] of accounts) {
     done++;
     try {
-      await acc.uploader.init();
-      if (!acc.cookies) {
-        const r = await acc.uploader.login(acc.login, acc.password);
-        if (r.captcha) { fail++; await bot.sendMessage(chatId, `⚠️ ${acc.name}: капча`).catch(() => {}); continue; }
-      }
       const r = await acc.uploader.setBio(bioText);
-      if (r.success) ok++;
-      else { fail++; console.error(`bio ${acc.name}: ${r.error}`); }
-      await acc.uploader.close();
-    } catch (e) {
-      fail++;
-      console.error(`bio ${acc.name}: ${e.message}`);
-      try { await acc.uploader.close(); } catch {}
-    }
+      if (r && !r.error) ok++;
+      else fail++;
+    } catch (e) { fail++; }
     if (done % 5 === 0 || done === accounts.size) {
       await bot.sendMessage(chatId, `📝 ${done}/${accounts.size} (✅${ok} ❌${fail})`).catch(() => {});
     }
@@ -1032,31 +931,15 @@ async function applyBioAll(chatId, bioText) {
 async function startPost(chatId, id, session) {
   const acc = accounts.get(id);
   if (!acc) return bot.sendMessage(chatId, "❌ Нет аккаунта.");
-
   acc.status = "posting";
   await store.updateStatus(id, "posting");
   await bot.sendMessage(chatId, `📤 Заливаю в ${acc.name}...`);
 
   try {
-    await acc.uploader.init();
-    if (!acc.cookies) {
-      const r = await acc.uploader.login(acc.login, acc.password);
-      if (r.captcha) {
-        acc.status = "captcha";
-        await store.updateStatus(id, "captcha");
-        return bot.sendMessage(chatId, `⚠️ Капча.`);
-      }
-    }
-
-    const warmer = new TikTokWarmer(acc.uploader);
-    await warmer.randomScroll(60);
-
     const hashtags = buildHashtags({ niche: acc.niche || undefined });
     await bot.sendMessage(chatId, `🏷 ${hashtags.join(' ')}`);
-
     const caption = session.caption || "Check this out 🔥";
     const r = await acc.uploader.uploadVideo(session.rendered, caption, { hashtags });
-
     acc.status = "posted";
     acc.postsCount = (acc.postsCount || 0) + 1;
     await store.updateStatus(id, "posted");
@@ -1067,7 +950,6 @@ async function startPost(chatId, id, session) {
     await store.updateStatus(id, "error");
     await bot.sendMessage(chatId, `❌ ${acc.name}: ${String(e.message).slice(0, 500)}`);
   } finally {
-    await acc.uploader.close();
     if (session.input) cleanup(session.input);
     if (session.rendered) cleanup(session.rendered);
     sessions.delete(chatId);
@@ -1079,4 +961,4 @@ async function startPost(chatId, id, session) {
  * ============================================================ */
 
 bot.on("polling_error", err => console.error("POLLING:", err?.message || err));
-console.log("Zenodrop TikTok Farm v6 started.");
+console.log("Zenodrop TikTok Farm started.");
