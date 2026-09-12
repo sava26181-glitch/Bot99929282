@@ -1,155 +1,358 @@
+const crypto = require('crypto');
+
+/* ============================================================
+ *  КОНСТАНТЫ ПОВЕДЕНИЯ
+ * ============================================================ */
+
+const COMMENT_POOL = [
+  'this is fire 🔥', 'lol', 'so true', 'omg', 'no way',
+  'need this', 'who else watching in 2026', 'first',
+  'the algorithm blessed me', 'saving this', '😂😂😂',
+  'wait what', 'explain', 'tutorial pls', 'goated',
+  'im dead 💀', 'bruh', 'fr fr', 'this hits different',
+  'lowkey need', 'highkey fire', 'no shot', 'bro what',
+  'sheeeesh', 'underrated', 'cant stop watching'
+];
+
+const SEARCH_KEYWORDS = [
+  'funny', 'cats', 'dance', 'cooking', 'diy', 'gaming',
+  'music', 'art', 'nature', 'sports', 'tech', 'business',
+  'motivation', 'money', 'travel', 'food', 'fitness',
+  'fashion', 'beauty', 'cars', 'animals', 'comedy'
+];
+
+const REGIONS = ['US', 'GB', 'CA', 'AU'];
+
+/* ============================================================
+ *  УТИЛИТЫ
+ * ============================================================ */
+
+function randInt(min, max) {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function pick(arr) {
+  return arr[Math.floor(Math.random() * arr.length)];
+}
+
+function humanDelay(minMs, maxMs) {
+  return new Promise(r => setTimeout(r, randInt(minMs, maxMs)));
+}
+
 function randomComment() {
-  const comments = [
-    'this is fire 🔥', 'lol', 'so true', 'omg', 'no way',
-    'need this', 'who else watching in 2026', 'first',
-    'the algorithm blessed me', 'saving this', '😂😂😂',
-    'wait what', 'explain', 'tutorial pls', 'goated',
-    'im dead 💀', 'bruh', 'fr fr', 'this hits different',
-    'lowkey need', 'highkey fire', 'no shot', 'bro what'
-  ];
-  return comments[Math.floor(Math.random() * comments.length)];
+  return pick(COMMENT_POOL);
 }
 
 function randomKeyword() {
-  const words = ['funny', 'cats', 'dance', 'cooking', 'diy', 'gaming',
-    'music', 'art', 'nature', 'sports', 'tech', 'business',
-    'motivation', 'money', 'travel', 'food'];
-  return words[Math.floor(Math.random() * words.length)];
+  return pick(SEARCH_KEYWORDS);
 }
 
-class TikTokWarmer {
-  constructor(uploader) {
-    this.up = uploader;
-    this.page = uploader.page;
+/* ============================================================
+ *  WARMER
+ * ============================================================ */
+
+class TikTokMobileWarmer {
+  constructor(api) {
+    // api — это экземпляр TikTokMobile из tiktok_uploader.js
+    this.api = api;
+    this.stats = {
+      feeds: 0,
+      views: 0,
+      likes: 0,
+      comments: 0,
+      follows: 0,
+      searches: 0,
+      shares: 0
+    };
   }
 
-  async humanDelay(min, max) {
-    const delay = Math.floor(Math.random() * (max - min) + min);
-    await this.page.waitForTimeout(delay);
-  }
-
-  async safeClick(selector) {
+  /**
+   * Получить ленту видео.
+   * count — сколько видео вернуть (обычно 6).
+   * type — 0 = For You, 1 = Following.
+   */
+  async fetchFeed(count = 6, type = 0) {
     try {
-      const el = await this.page.$(selector);
-      if (el) {
-        const box = await el.boundingBox();
-        if (box && box.width > 0 && box.height > 0) {
-          await this.page.mouse.click(
-            box.x + box.width * (0.3 + Math.random() * 0.4),
-            box.y + box.height * (0.3 + Math.random() * 0.4)
-          );
-          return true;
-        }
-      }
+      const result = await this.api.signedRequest('/aweme/v1/feed/', {
+        count,
+        type,
+        feed_style: 2,
+        pull_type: 0,
+        max_cursor: 0,
+        min_cursor: 0
+      });
+      this.stats.feeds++;
+      return result.aweme_list || [];
+    } catch (e) {
+      console.error('[warmer] feed error:', e.message);
+      return [];
+    }
+  }
+
+  /**
+   * "Просмотр" видео — запрашиваем статистику + задержка.
+   * TikTok считает просмотр когда приходит запрос на stats.
+   */
+  async viewVideo(aweme, durationMs) {
+    try {
+      // Heartbeat: stats запрос
+      await this.api.signedRequest('/aweme/v1/aweme/stats/', {
+        aweme_id: aweme.aweme_id,
+        play_delta: Math.floor(durationMs / 1000),
+        item_type: 0
+      });
+      this.stats.views++;
+    } catch (e) {
+      // Молча — TikTok часто возвращает пустое тело
+    }
+    await humanDelay(durationMs, durationMs + 1000);
+  }
+
+  /**
+   * Лайк видео.
+   */
+  async likeVideo(aweme) {
+    try {
+      await this.api.signedRequest('/aweme/v1/commit/item/digg/', {
+        aweme_id: aweme.aweme_id,
+        type: 1
+      });
+      this.stats.likes++;
+      return true;
+    } catch (e) {
+      console.error('[warmer] like error:', e.message);
+      return false;
+    }
+  }
+
+  /**
+   * Снять лайк (редко, для реализма).
+   */
+  async unlikeVideo(aweme) {
+    try {
+      await this.api.signedRequest('/aweme/v1/commit/item/digg/', {
+        aweme_id: aweme.aweme_id,
+        type: 0
+      });
     } catch {}
-    return false;
   }
 
-  async likeRandomVideo() {
-    await this.safeClick('[data-e2e="like-icon"], [data-e2e="browse-like-icon"]');
-    await this.humanDelay(300, 1000);
+  /**
+   * Комментарий к видео.
+   */
+  async commentVideo(aweme, text) {
+    try {
+      await this.api.signedRequest('/aweme/v1/comment/publish/', {
+        aweme_id: aweme.aweme_id,
+        text: text || randomComment(),
+        comment_id: 0,
+        text_extra: '[]'
+      });
+      this.stats.comments++;
+      return true;
+    } catch (e) {
+      console.error('[warmer] comment error:', e.message);
+      return false;
+    }
   }
 
-  async randomScroll(seconds) {
+  /**
+   * Подписка на автора.
+   */
+  async followUser(aweme) {
+    const uid = aweme.author?.uid;
+    if (!uid) return false;
+    try {
+      await this.api.signedRequest('/aweme/v1/commit/follow/user/', {
+        user_id: uid,
+        type: 1,
+        sec_user_id: aweme.author?.sec_uid || ''
+      });
+      this.stats.follows++;
+      return true;
+    } catch (e) {
+      console.error('[warmer] follow error:', e.message);
+      return false;
+    }
+  }
+
+  /**
+   * Шеринг видео (внутренний — сохранить в избранное).
+   */
+  async shareVideo(aweme) {
+    try {
+      await this.api.signedRequest('/aweme/v1/aweme/collect/', {
+        aweme_id: aweme.aweme_id,
+        action: 1
+      });
+      this.stats.shares++;
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
+   * Поиск по ключевому слову.
+   */
+  async search(keyword) {
+    try {
+      const result = await this.api.signedRequest('/aweme/v1/search/item/', {
+        keyword: keyword || randomKeyword(),
+        count: 10,
+        offset: 0,
+        search_source: 'normal_search',
+        hot_search: 0
+      });
+      this.stats.searches++;
+      return result.aweme_list || result.data || [];
+    } catch (e) {
+      console.error('[warmer] search error:', e.message);
+      return [];
+    }
+  }
+
+  /**
+   * Одна сессия просмотра ленты.
+   * Длится `seconds` секунд, дёргает ленту и делает действия.
+   */
+  async scrollSession(seconds) {
     const endTime = Date.now() + seconds * 1000;
     let videosWatched = 0;
 
     while (Date.now() < endTime) {
-      const pattern = Math.random();
-      if (pattern < 0.6) {
-        await this.page.mouse.wheel(0, Math.floor(Math.random() * 600) + 400);
-      } else if (pattern < 0.8) {
-        await this.page.mouse.wheel(0, Math.floor(Math.random() * 1500) + 800);
-        await this.humanDelay(500, 1200);
-      } else {
-        await this.page.mouse.wheel(0, -Math.floor(Math.random() * 800) - 300);
-        await this.humanDelay(2000, 4000);
+      // Получаем пачку видео
+      const feed = await this.fetchFeed(6, 0);
+      if (!feed.length) {
+        await humanDelay(3000, 6000);
+        continue;
       }
 
-      const watchTime = Math.random() < 0.7
-        ? Math.floor(Math.random() * 5000) + 2000
-        : Math.floor(Math.random() * 30000) + 8000;
-      await this.page.waitForTimeout(watchTime);
-      videosWatched++;
+      for (const aweme of feed) {
+        if (Date.now() >= endTime) break;
+        if (!aweme?.aweme_id) continue;
 
-      const action = Math.random();
+        // Смотрим видео — время зависит от длины видео
+        const videoDuration = (aweme.video?.duration || 5000);
+        // Смотрим 60-100% длины, но не больше 30 сек
+        const watchRatio = 0.6 + Math.random() * 0.4;
+        const watchTime = Math.min(
+          Math.floor(videoDuration * watchRatio),
+          30000
+        );
 
-      if (action < 0.22) {
-        await this.likeRandomVideo();
-      } else if (action < 0.25 && Math.random() < 0.3) {
-        const ok = await this.safeClick('[data-e2e="comment-icon"], [data-e2e="browse-comment-icon"]');
-        if (ok) {
-          await this.humanDelay(2000, 4000);
-          try {
-            await this.page.keyboard.type(randomComment(), { delay: 80 });
-            await this.humanDelay(500, 1200);
-            await this.page.keyboard.press('Enter');
-            await this.humanDelay(1500, 2500);
-            await this.page.keyboard.press('Escape');
-          } catch {}
+        await this.viewVideo(aweme, watchTime);
+        videosWatched++;
+
+        // Действия с вероятностями
+        const action = Math.random();
+
+        if (action < 0.22) {
+          // Лайк
+          await this.likeVideo(aweme);
+          await humanDelay(800, 2000);
+        } else if (action < 0.25 && Math.random() < 0.3) {
+          // Комментарий (редко)
+          await this.commentVideo(aweme, randomComment());
+          await humanDelay(2000, 4000);
+        } else if (action < 0.28) {
+          // Подписка
+          await this.followUser(aweme);
+          await humanDelay(1500, 3000);
+        } else if (action < 0.30) {
+          // Сохранить
+          await this.shareVideo(aweme);
+          await humanDelay(800, 1500);
         }
-      } else if (action < 0.30) {
-        const ok = await this.safeClick('[data-e2e="video-author-uniqueid"], [data-e2e="browse-username"]');
-        if (ok) {
-          await this.humanDelay(3000, 8000);
-          await this.page.goBack().catch(() => {});
-          await this.humanDelay(1000, 2000);
-        }
-      } else if (action < 0.32) {
-        const ok = await this.safeClick('[data-e2e="share-icon"], [data-e2e="browse-share-icon"]');
-        if (ok) {
-          await this.humanDelay(1500, 2500);
-          await this.page.keyboard.press('Escape');
+
+        // Иногда «залипаем» — долгая пауза
+        if (Math.random() < 0.  1) {
+          await humanDelay(5000, * 12000);
+        minutes }
+
+        // Микро-пауза междуPer видео
+        await humanDelay(500, Day2000);
+      }
+
+      // Иногда переключаемся на поиск
+      if (Math.random() < 0.05) {
+        const results = await this.search(randomKeyword());
+        // Просматриваем 2-3 результата
+        for (const aweme of results.slice(0, 3)) {
+          if (Date.now() >= endTime) break;
+          if (!aweme?.aweme_id) continue;
+          const watchTime = randInt(3000, 15000);
+          await this.viewVideo(aweme, watchTime);
+          if (Math.random() < 0.25) await this.likeVideo(aweme);
         }
       }
 
-      if (Math.random() < 0.03) {
-        await this.page.goto('https://www.tiktok.com/search?q=' + randomKeyword(), {
-          waitUntil: 'domcontentloaded', timeout: 30000
-        }).catch(() => {});
-        await this.humanDelay(3000, 6000);
-      }
-
-      if (Math.random() < 0.1) {
-        await this.humanDelay(3000, 8000);
-      }
+      // Небольшая пауза перед следующей пачкой
+      await humanDelay(2000, 5000);
     }
 
     return videosWatched;
   }
 
+  /**
+   * Полный цикл прогрева.
+   * days — сколько дней.
+ — сколько минут в день.
+   */
   async warmAccount(days = 3, minutesPerDay = 20) {
+    console.log(`[warmer] Начинаю прогрев на ${days} дней по ${minutesPerDay} мин`);
+
     for (let day = 1; day <= days; day++) {
-      console.log(`[warm] day ${day}/${days}`);
+      console.log(`[warmer] День ${day}/${days}`);
 
+      // Утренняя сессия
       try {
-        await this.page.goto('https://www.tiktok.com/foryou', {
-          waitUntil: 'domcontentloaded', timeout: 60000
-        });
-        await this.humanDelay(3000, 7000);
-        await this.randomScroll(minutesPerDay * 30);
-      } catch (e) { console.error('warm morning err:', e.message); }
+        console.log('[warmer] Утро — For You');
+        await this.scrollSession(minutesPerDay * 30); // половина времени
+      } catch (e) {
+        console.error('[warmer] morning error:', e.message);
+      }
 
+      // Дневная пауза
+      await humanDelay(3 * 60 * 60 * 1000, 5 * 60 * 60 * 1000);
+
+      // Дневная сессия — поиск
       try {
-        await this.page.goto('https://www.tiktok.com/search?q=' + randomKeyword(), {
-          waitUntil: 'domcontentloaded', timeout: 60000
-        });
-        await this.humanDelay(2000, 5000);
-        await this.randomScroll(minutesPerDay * 20);
-      } catch (e) { console.error('warm midday err:', e.message); }
+        console.log('[warmer] День — поиск');
+        const results = await this.search(randomKeyword());
+        for (const aweme of results.slice(0, 10)) {
+          if (!aweme?.aweme_id) continue;
+          await this.viewVideo(aweme, randInt(3000, 15000));
+          if (Math.random() < 0.25) await this.likeVideo(aweme);
+          if (Math.random() < 0.02) await this.commentVideo(aweme);
+          await humanDelay(1000, 3000);
+        }
+        await this.scrollSession(minutesPerDay * 20);
+      } catch (e) {
+        console.error('[warmer] midday error:', e.message);
+      }
 
+      // Вечерняя пауза
+      await humanDelay(3 * 60 * 60 * 1000, 5 * 60 * 60 * 1000);
+
+      // Вечерняя сессия
       try {
-        await this.page.goto('https://www.tiktok.com/foryou', {
-          waitUntil: 'domcontentloaded', timeout: 60000
-        });
-        await this.randomScroll(minutesPerDay * 30);
-      } catch (e) { console.error('warm evening err:', e.message); }
+        console.log('[warmer] Вечер — For You');
+        await this.scrollSession(minutesPerDay * 30);
+      } catch (e) {
+        console.error('[warmer] evening error:', e.message);
+      }
 
+      // Ночная пауза между днями
       if (day < days) {
-        await this.page.waitForTimeout(6 * 60 * 60 * 1000);
+        console.log('[warmer] Ночная пауза 8 часов');
+        await humanDelay(7 * 60 * 60 * 1000, 9 * 60 * 60 * 1000);
       }
     }
+
+    console.log('[warmer] Прогрев завершён:', JSON.stringify(this.stats));
+    return this.stats;
   }
 }
 
-module.exports = { TikTokWarmer, randomComment, randomKeyword };
+module.exports = { TikTokMobileWarmer, randomComment, randomKeyword };
