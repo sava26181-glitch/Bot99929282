@@ -55,7 +55,6 @@ class TikTokWarmer {
     let videosWatched = 0;
 
     while (Date.now() < endTime) {
-      // Скролл с вариациями
       const pattern = Math.random();
       if (pattern < 0.6) {
         await this.page.mouse.wheel(0, Math.floor(Math.random() * 600) + 400);
@@ -67,20 +66,17 @@ class TikTokWarmer {
         await this.humanDelay(2000, 4000);
       }
 
-      // Время просмотра
       const watchTime = Math.random() < 0.7
         ? Math.floor(Math.random() * 5000) + 2000
         : Math.floor(Math.random() * 30000) + 8000;
       await this.page.waitForTimeout(watchTime);
       videosWatched++;
 
-      // Действия
       const action = Math.random();
 
       if (action < 0.22) {
         await this.likeRandomVideo();
       } else if (action < 0.25 && Math.random() < 0.3) {
-        // Комментарий
         const ok = await this.safeClick('[data-e2e="comment-icon"], [data-e2e="browse-comment-icon"]');
         if (ok) {
           await this.humanDelay(2000, 4000);
@@ -93,7 +89,6 @@ class TikTokWarmer {
           } catch {}
         }
       } else if (action < 0.30) {
-        // Профиль автора
         const ok = await this.safeClick('[data-e2e="video-author-uniqueid"], [data-e2e="browse-username"]');
         if (ok) {
           await this.humanDelay(3000, 8000);
@@ -101,7 +96,6 @@ class TikTokWarmer {
           await this.humanDelay(1000, 2000);
         }
       } else if (action < 0.32) {
-        // Share
         const ok = await this.safeClick('[data-e2e="share-icon"], [data-e2e="browse-share-icon"]');
         if (ok) {
           await this.humanDelay(1500, 2500);
@@ -109,16 +103,13 @@ class TikTokWarmer {
         }
       }
 
-      // Изредка — поиск
       if (Math.random() < 0.03) {
         await this.page.goto('https://www.tiktok.com/search?q=' + randomKeyword(), {
-          waitUntil: 'domcontentloaded',
-          timeout: 30000
+          waitUntil: 'domcontentloaded', timeout: 30000
         }).catch(() => {});
         await this.humanDelay(3000, 6000);
       }
 
-      // Микро-паузы "залипания"
       if (Math.random() < 0.1) {
         await this.humanDelay(3000, 8000);
       }
@@ -131,36 +122,29 @@ class TikTokWarmer {
     for (let day = 1; day <= days; day++) {
       console.log(`[warm] day ${day}/${days}`);
 
-      // Утро — For You
       try {
         await this.page.goto('https://www.tiktok.com/foryou', {
-          waitUntil: 'domcontentloaded',
-          timeout: 60000
+          waitUntil: 'domcontentloaded', timeout: 60000
         });
         await this.humanDelay(3000, 7000);
         await this.randomScroll(minutesPerDay * 30);
       } catch (e) { console.error('warm morning err:', e.message); }
 
-      // День — поиск
       try {
         await this.page.goto('https://www.tiktok.com/search?q=' + randomKeyword(), {
-          waitUntil: 'domcontentloaded',
-          timeout: 60000
+          waitUntil: 'domcontentloaded', timeout: 60000
         });
         await this.humanDelay(2000, 5000);
         await this.randomScroll(minutesPerDay * 20);
       } catch (e) { console.error('warm midday err:', e.message); }
 
-      // Вечер — ещё For You
       try {
         await this.page.goto('https://www.tiktok.com/foryou', {
-          waitUntil: 'domcontentloaded',
-          timeout: 60000
+          waitUntil: 'domcontentloaded', timeout: 60000
         });
         await this.randomScroll(minutesPerDay * 30);
       } catch (e) { console.error('warm evening err:', e.message); }
 
-      // Между днями — пауза
       if (day < days) {
         await this.page.waitForTimeout(6 * 60 * 60 * 1000);
       }
