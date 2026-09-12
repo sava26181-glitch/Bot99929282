@@ -3,10 +3,7 @@ FROM mcr.microsoft.com/playwright:v1.40.0-jammy
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
-    python3 \
-    python3-pip \
-    curl \
+    ffmpeg python3 python3-pip curl \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip3 install --no-cache-dir yt-dlp
