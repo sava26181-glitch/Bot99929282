@@ -189,10 +189,6 @@ async function markPosted(accId) {
   );
 }
 
-/* ============================================================
- *  ПРОКСИ
- * ============================================================ */
-
 async function saveProxy(p) {
   if (!pool) {
     const file = path.join(__dirname, 'proxies.json');
@@ -358,10 +354,6 @@ async function proxyStats() {
   }
   return result;
 }
-
-/* ============================================================
- *  УДАЛЕНИЕ ВСЕГО
- * ============================================================ */
 
 async function deleteAllAccounts() {
   if (!pool) {
