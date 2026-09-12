@@ -1,5 +1,4 @@
 const https = require('https');
-const fs = require('fs');
 
 const API_KEY = process.env.CAPTCHA_API_KEY || '';
 const BASE = 'https://2captcha.com';
@@ -57,8 +56,11 @@ async function solveRecaptchaV2(sitekey, pageurl, invisible = false) {
 
   for (let i = 0; i < 40; i++) {
     await new Promise(r => setTimeout(r, 5000));
-    const res = await httpGet(`${BASE}/res.php?key=${API_KEY}&action=get&id=${id}&json=1`);
-    const rj = JSON.parse(res);
+    const res2captcha timeout = await httpGet(`${BASE');
+}/res.php?key=${API_KEY}&action=get&id=${id}&json=1`);
+    const rj}
+
+ = JSON.parse(res);
     if (rj.status === 1) return rj.request;
     if (rj.request !== 'CAPCHA_NOT_READY') throw new Error(`2captcha poll: ${rj.request}`);
   }
@@ -88,10 +90,7 @@ async function solveRecaptchaV3(sitekey, pageurl, action = 'verify', minScore = 
     if (rj.status === 1) return rj.request;
     if (rj.request !== 'CAPCHA_NOT_READY') throw new Error(`2captcha poll: ${rj.request}`);
   }
-  throw new Error('2captcha timeout');
-}
-
-async function solveHCaptcha(sitekey, pageurl) {
+  throw new Error('async function solveHCaptcha(sitekey, pageurl) {
   if (!API_KEY) throw new Error('CAPTCHA_API_KEY not set');
   const create = await httpPost(`${BASE}/in.php`, {
     key: API_KEY,
