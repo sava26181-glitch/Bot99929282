@@ -7,12 +7,13 @@ const { spawn } = require("child_process");
 const https = require("https");
 
 const TikTokUploader = require("./tiktok_uploader");
-const { buildHashtags, refreshTrending, BRAND_TAG } = require("./tiktok_uploader");
+const { buildHashtags, refreshTrending, BRAND_TAG, DEFAULT_BIO } = require("./tiktok_uploader");
 const { TikTokWarmer } = require("./warmer");
 const { generateFingerprint } = require("./fingerprint");
 const proxyMgr = require("./proxy_manager");
 const factory = require("./account_factory");
 const store = require("./accounts_store");
+const captchaSolver = require("./captcha_solver");
 
 /* ============================================================
  *  КОНФИГ
@@ -28,6 +29,7 @@ const HEADLESS = String(process.env.HEADLESS || "true") !== "false";
 
 const ROOT = __dirname;
 const BANNER = path.join(ROOT, "banner.mp4");
+const AVATAR_PATH = path.join(ROOT, "avatar.png");
 const TMP = path.join(os.tmpdir(), "zenodrop-tiktok");
 fs.mkdirSync(TMP, { recursive: true });
 
@@ -40,9 +42,11 @@ const bot = new TelegramBot(TOKEN, { polling: true });
 const sessions = new Map();
 const accounts = new Map();
 const factoryJobs = new Map();
+const avatarWaiting = new Map();
+const bioWaiting = new Map();
 
 /* ============================================================
- *  УТИЛИТЫ (без изменений)
+ *  УТИЛИТЫ
  * ============================================================ */
 
 function cleanup(...files) {
@@ -149,7 +153,7 @@ async function downloadTikTok(url, dest) {
 }
 
 /* ============================================================
- *  БАННЕР-РЕНДЕР (тот же)
+ *  БАННЕР-РЕНДЕР
  * ============================================================ */
 
 async function renderVideo(input, output, insertAt, bannerDuration, count) {
@@ -256,8 +260,11 @@ function mainMenuKeyboard() {
       [{ text: "🏭 Массовое создание", callback_data: "factory" }],
       [{ text: "📋 Список аккаунтов", callback_data: "list_accounts" }],
       [{ text: "🔥 Прогреть все", callback_data: "warm_all" }],
+      [{ text: "🖼 Аватарка на все", callback_data: "set_avatar_all" }],
+      [{ text: "📝 Био на все", callback_data: "set_bio_all" }],
       [{ text: "🌐 Прокси", callback_data: "proxies" }],
       [{ text: "🏷 Сменить ник", callback_data: "change_nick" }],
+      [{ text: "🔑 2captcha баланс", callback_data: "captcha_balance" }],
       [{ text: "📊 Статус", callback_data: "status" }]
     ]
   };
@@ -291,7 +298,6 @@ function showSettings(chatId) {
   store.initDB();
   await store.migrate();
 
-  // Загружаем аккаунты в память
   try {
     const list = await store.loadAllAccounts();
     for (const a of list) {
@@ -320,7 +326,7 @@ function showSettings(chatId) {
 
 bot.onText(/^\/start$/, msg => {
   bot.sendMessage(msg.chat.id,
-    "🤖 *Zenodrop TikTok Farm v5*\n\n" +
+    "🤖 *Zenodrop TikTok Farm v6*\n\n" +
     "• /menu — меню\n" +
     "• Отправь видео или ссылку TikTok — обработка\n" +
     "• Отправь `login:password:name:tag1,tag2` — добавить аккаунт вручную",
@@ -368,6 +374,71 @@ bot.on("video", async msg => {
 });
 
 /* ============================================================
+ *  ФОТО — АВАТАРКА
+ * ============================================================ */
+
+bot.on("photo", async msg => {
+  const chatId = msg.chat.id;
+  if (!avatarWaiting.get(chatId)) return;
+
+  const photos = msg.photo;
+  const fileId = photos[photos.length - 1].file_id;
+
+  try {
+    await bot.sendMessage(chatId, "⬇️ Получаю изображение...");
+    const f = await bot.getFile(fileId);
+    const url = `https://api.telegram.org/file/bot${TOKEN}/${f.file_path}`;
+
+    await new Promise((resolve, reject) => {
+      const stream = fs.createWriteStream(AVATAR_PATH);
+      https.get(url, res => {
+        if (res.statusCode !== 200) { stream.close(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+        res.pipe(stream);
+        stream.on("finish", () => stream.close(resolve));
+      }).on("error", reject);
+    });
+
+    avatarWaiting.delete(chatId);
+    await bot.sendMessage(chatId, `✅ Сохранено. Ставлю на ${accounts.size} аккаунтов...`);
+    await applyAvatarAll(chatId, AVATAR_PATH);
+  } catch (e) {
+    avatarWaiting.delete(chatId);
+    await bot.sendMessage(chatId, `❌ ${e.message}`);
+  }
+});
+
+bot.on("document", async msg => {
+  const chatId = msg.chat.id;
+  if (!avatarWaiting.get(chatId)) return;
+  const doc = msg.document;
+  if (!doc.mime_type || !doc.mime_type.startsWith('image/')) {
+    return bot.sendMessage(chatId, "❌ Это не изображение.");
+  }
+
+  try {
+    await bot.sendMessage(chatId, "⬇️ Получаю файл...");
+    const f = await bot.getFile(doc.file_id);
+    const url = `https://api.telegram.org/file/bot${TOKEN}/${f.file_path}`;
+
+    await new Promise((resolve, reject) => {
+      const stream = fs.createWriteStream(AVATAR_PATH);
+      https.get(url, res => {
+        if (res.statusCode !== 200) { stream.close(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+        res.pipe(stream);
+        stream.on("finish", () => stream.close(resolve));
+      }).on("error", reject);
+    });
+
+    avatarWaiting.delete(chatId);
+    await bot.sendMessage(chatId, `✅ Сохранено. Ставлю на ${accounts.size} аккаунтов...`);
+    await applyAvatarAll(chatId, AVATAR_PATH);
+  } catch (e) {
+    avatarWaiting.delete(chatId);
+    await bot.sendMessage(chatId, `❌ ${e.message}`);
+  }
+});
+
+/* ============================================================
  *  ТЕКСТ
  * ============================================================ */
 
@@ -376,7 +447,16 @@ bot.on("message", async msg => {
   const text = (msg.text || "").trim();
   if (!text || text.startsWith("/")) return;
 
-  // Состояния диалога
+  // Био
+  if (bioWaiting.get(chatId)) {
+    bioWaiting.delete(chatId);
+    const bio = text === '-' ? DEFAULT_BIO : text;
+    await bot.sendMessage(chatId, `📝 Ставлю био на ${accounts.size} аккаунтов...`);
+    await applyBioAll(chatId, bio);
+    return;
+  }
+
+  // Состояния фабрики
   const job = factoryJobs.get(chatId);
   if (job && job.waiting) {
     if (job.waiting === "count") {
@@ -440,7 +520,6 @@ bot.on("message", async msg => {
       { parse_mode: "Markdown" });
   }
 
-  // Остальные состояния
   const s = sessions.get(chatId);
   if (!s) return;
 
@@ -460,7 +539,32 @@ bot.on("message", async msg => {
 });
 
 /* ============================================================
- *  CALLBACK
+ *  ПРОКСИ — ИМПОРТ
+ * ============================================================ */
+
+bot.on("message", async msg => {
+  const chatId = msg.chat.id;
+  const text = (msg.text || '').trim();
+  if (!text) return;
+
+  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  if (lines.length >= 2) {
+    const looksLikeProxy = lines.every(l =>
+      /^[a-z]+:\/\//i.test(l) ||
+      /^\d{1,3}(\.\d{1,3}){3}:\d+/.test(l) ||
+      /^[^\s:]+:\d+:[^\s:]+:[^\s:]+$/.test(l) ||
+      /^[^\s@]+:[^\s@]+@[^\s:]+:\d+$/.test(l)
+    );
+    if (looksLikeProxy) {
+      await bot.sendMessage(chatId, `🌐 Импортирую ${lines.length} строк...`);
+      const r = await proxyMgr.importProxies(text, 'telegram');
+      return bot.sendMessage(chatId, `✅ Добавлено: ${r.added}\n⏭ Пропущено: ${r.skipped}`);
+    }
+  }
+});
+
+/* ============================================================
+ *  CALLBACK QUERY
  * ============================================================ */
 
 bot.on("callback_query", async q => {
@@ -468,7 +572,6 @@ bot.on("callback_query", async q => {
   const s = sessions.get(chatId);
   const data = q.data;
 
-  /* --- МЕНЮ --- */
   if (data === "add_account") {
     await bot.answerCallbackQuery(q.id);
     return bot.sendMessage(chatId,
@@ -505,17 +608,44 @@ bot.on("callback_query", async q => {
     return bot.sendMessage(chatId, txt, { parse_mode: "Markdown" });
   }
 
-  /* --- ФАБРИКА --- */
+  if (data === "captcha_balance") {
+    await bot.answerCallbackQuery(q.id);
+    try {
+      const bal = await captchaSolver.getBalance();
+      return bot.sendMessage(chatId, bal === null
+        ? "❌ CAPTCHA_API_KEY не задан или неверный."
+        : `💰 Баланс 2captcha: ${bal} USD`);
+    } catch (e) {
+      return bot.sendMessage(chatId, `❌ ${e.message}`);
+    }
+  }
+
+  if (data === "set_avatar_all") {
+    await bot.answerCallbackQuery(q.id);
+    if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
+    avatarWaiting.set(chatId, true);
+    return bot.sendMessage(chatId,
+      "🖼 Отправь изображение (как фото или файлом). Я поставлю его на все " +
+      `${accounts.size} аккаунтов.`);
+  }
+
+  if (data === "set_bio_all") {
+    await bot.answerCallbackQuery(q.id);
+    if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
+    bioWaiting.set(chatId, true);
+    return bot.sendMessage(chatId,
+      `📝 Отправь текст био. Дефолтный:\n\n${DEFAULT_BIO}\n\n` +
+      "Отправь `-` чтобы использовать дефолтный.");
+  }
+
   if (data === "factory") {
     await bot.answerCallbackQuery(q.id);
     factoryJobs.set(chatId, { waiting: "count" });
     return bot.sendMessage(chatId,
-      "🏭 *Массовое создание аккаунтов*\n\nСколько аккаунтов создать? (1..100)\n\n" +
-      "⚠️ Требуется свободный пул прокси и почтовый провайдер.",
+      "🏭 *Массовое создание аккаунтов*\n\nСколько аккаунтов создать? (1..100)",
       { parse_mode: "Markdown" });
   }
 
-  /* --- ПРОКСИ --- */
   if (data === "proxies") {
     await bot.answerCallbackQuery(q.id);
     const list = await store.loadAllProxies();
@@ -557,7 +687,6 @@ bot.on("callback_query", async q => {
     return bot.sendMessage(chatId, "⚠️ Очистка не реализована — удаляй строки напрямую в БД.");
   }
 
-  /* --- СМЕНА НИКА --- */
   if (data === "change_nick") {
     await bot.answerCallbackQuery(q.id);
     if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
@@ -575,25 +704,21 @@ bot.on("callback_query", async q => {
     const acc = accounts.get(id);
     if (acc) acc.__waitNick = true;
     return bot.sendMessage(chatId,
-      `🏷 Введи новый ник для *${acc?.name}*:\n\n` +
-      `Рекомендую формат: \`zenodrop_XXXX\`\n\nОтправь ник одним сообщением.`,
+      `🏷 Введи новый ник для *${acc?.name}*:\n\nРекомендую: \`zenodrop_XXXX\``,
       { parse_mode: "Markdown" });
   }
 
-  /* --- ПРОГРЕВ ВСЕХ --- */
   if (data === "warm_all") {
     await bot.answerCallbackQuery(q.id);
     return startWarmAll(chatId);
   }
 
-  /* --- ПРОГРЕВ ОДНОГО --- */
   if (data.startsWith("warm_")) {
     const id = data.slice(5);
     await bot.answerCallbackQuery(q.id);
     return startWarm(chatId, id);
   }
 
-  /* --- ПРЕВЬЮ ХЕШТЕГОВ --- */
   if (data.startsWith("preview_tags_")) {
     const id = data.slice("preview_tags_".length);
     await bot.answerCallbackQuery(q.id);
@@ -603,7 +728,6 @@ bot.on("callback_query", async q => {
     return bot.sendMessage(chatId, `🏷 *${acc.name}*\n\n${tags.join(' ')}\n\nВсего: ${tags.length}`, { parse_mode: "Markdown" });
   }
 
-  /* --- БАННЕР --- */
   if (!s) return bot.answerCallbackQuery(q.id, { text: "Сначала видео." });
 
   if (data === "time") {
@@ -648,7 +772,7 @@ bot.on("callback_query", async q => {
 });
 
 /* ============================================================
- *  СМЕНА НИКА — текстовый обработчик
+ *  СМЕНА НИКА
  * ============================================================ */
 
 bot.on("message", async msg => {
@@ -680,32 +804,6 @@ bot.on("message", async msg => {
 });
 
 /* ============================================================
- *  ПРОКСИ — импорт из сообщения
- * ============================================================ */
-
-bot.on("message", async msg => {
-  const chatId = msg.chat.id;
-  const text = (msg.text || '').trim();
-  if (!text) return;
-
-  // Эвристика: если много строк, и в них есть "://" или ":" с портом — это прокси
-  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  if (lines.length >= 2) {
-    const looksLikeProxy = lines.every(l =>
-      /^[a-z]+:\/\//i.test(l) ||
-      /^\d{1,3}(\.\d{1,3}){3}:\d+/.test(l) ||
-      /^[^\s:]+:\d+:[^\s:]+:[^\s:]+$/.test(l) ||
-      /^[^\s@]+:[^\s@]+@[^\s:]+:\d+$/.test(l)
-    );
-    if (looksLikeProxy) {
-      await bot.sendMessage(chatId, `🌐 Импортирую ${lines.length} строк...`);
-      const r = await proxyMgr.importProxies(text, 'telegram');
-      return bot.sendMessage(chatId, `✅ Добавлено: ${r.added}\n⏭ Пропущено: ${r.skipped}`);
-    }
-  }
-});
-
-/* ============================================================
  *  ФАБРИКА
  * ============================================================ */
 
@@ -716,7 +814,6 @@ async function startFactory(chatId, job) {
   await bot.sendMessage(chatId,
     `🏭 Запускаю создание ${count} аккаунтов...\nНиша: ${niche ? niche.join(', ') : 'общая'}`);
 
-  const created = [];
   try {
     const r = await factory.createBatch({
       count,
@@ -732,7 +829,6 @@ async function startFactory(chatId, job) {
       }
     });
 
-    // Загружаем созданные в память
     for (const acc of r.ok) {
       acc.uploader = new TikTokUploader({
         proxy: acc.proxy,
@@ -797,17 +893,70 @@ async function startWarmAll(chatId) {
   let done = 0;
   for (const [id, acc] of accounts) {
     if (acc.status === 'warming') continue;
-    try {
-      await startWarm(chatId, id);
-    } catch {}
+    try { await startWarm(chatId, id); } catch {}
     done++;
-    if (done % 5 === 0) {
-      await bot.sendMessage(chatId, `⏳ ${done}/${accounts.size}`).catch(() => {});
-    }
-    // Пауза между аккаунтами, чтобы не спалить сеть
+    if (done % 5 === 0) await bot.sendMessage(chatId, `⏳ ${done}/${accounts.size}`).catch(() => {});
     await new Promise(r => setTimeout(r, 30_000));
   }
   await bot.sendMessage(chatId, `✅ Прогрев завершён: ${done}`);
+}
+
+/* ============================================================
+ *  АВАТАРКА + БИО НА ВСЕ
+ * ============================================================ */
+
+async function applyAvatarAll(chatId, imagePath) {
+  let done = 0, ok = 0, fail = 0;
+  for (const [id, acc] of accounts) {
+    done++;
+    try {
+      await acc.uploader.init();
+      if (!acc.cookies) {
+        const r = await acc.uploader.login(acc.login, acc.password);
+        if (r.captcha) { fail++; await bot.sendMessage(chatId, `⚠️ ${acc.name}: капча`).catch(() => {}); continue; }
+      }
+      const r = await acc.uploader.setAvatar(imagePath);
+      if (r.success) ok++;
+      else { fail++; console.error(`avatar ${acc.name}: ${r.error}`); }
+      await acc.uploader.close();
+    } catch (e) {
+      fail++;
+      console.error(`avatar ${acc.name} error: ${e.message}`);
+      try { await acc.uploader.close(); } catch {}
+    }
+    if (done % 5 === 0 || done === accounts.size) {
+      await bot.sendMessage(chatId, `🖼 ${done}/${accounts.size} (✅${ok} ❌${fail})`).catch(() => {});
+    }
+    await new Promise(r => setTimeout(r, 15000));
+  }
+  await bot.sendMessage(chatId, `✅ Аватарка: ${ok} успешно, ${fail} ошибок.`);
+}
+
+async function applyBioAll(chatId, bioText) {
+  let done = 0, ok = 0, fail = 0;
+  for (const [id, acc] of accounts) {
+    done++;
+    try {
+      await acc.uploader.init();
+      if (!acc.cookies) {
+        const r = await acc.uploader.login(acc.login, acc.password);
+        if (r.captcha) { fail++; await bot.sendMessage(chatId, `⚠️ ${acc.name}: капча`).catch(() => {}); continue; }
+      }
+      const r = await acc.uploader.setBio(bioText);
+      if (r.success) ok++;
+      else { fail++; console.error(`bio ${acc.name}: ${r.error}`); }
+      await acc.uploader.close();
+    } catch (e) {
+      fail++;
+      console.error(`bio ${acc.name}: ${e.message}`);
+      try { await acc.uploader.close(); } catch {}
+    }
+    if (done % 5 === 0 || done === accounts.size) {
+      await bot.sendMessage(chatId, `📝 ${done}/${accounts.size} (✅${ok} ❌${fail})`).catch(() => {});
+    }
+    await new Promise(r => setTimeout(r, 15000));
+  }
+  await bot.sendMessage(chatId, `✅ Био: ${ok} успешно, ${fail} ошибок.`);
 }
 
 /* ============================================================
@@ -864,4 +1013,4 @@ async function startPost(chatId, id, session) {
  * ============================================================ */
 
 bot.on("polling_error", err => console.error("POLLING:", err?.message || err));
-console.log("Zenodrop TikTok Farm v5 started.");
+console.log("Zenodrop TikTok Farm v6 started.");
