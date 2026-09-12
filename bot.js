@@ -46,6 +46,13 @@ const factoryJobs = new Map();
 const avatarWaiting = new Map();
 const bioWaiting = new Map();
 
+/* Глобальный флаг остановки всех процессов */
+const stopFlags = {
+  factory: false,
+  warm: false,
+  post: false
+};
+
 /* ============================================================
  *  HTTP-СЕРВЕР ДЛЯ RENDER HEALTH CHECK
  * ============================================================ */
@@ -69,7 +76,6 @@ server.listen(PORT, () => {
   console.log(`[health] listening on port ${PORT}`);
 });
 
-/* Self-ping каждые 12 минут — чтобы Render Free не засыпал */
 if (process.env.RENDER) {
   setInterval(() => {
     const hostname = process.env.RENDER_EXTERNAL_HOSTNAME;
@@ -298,6 +304,8 @@ function mainMenuKeyboard() {
       [{ text: "📝 Био на все", callback_data: "set_bio_all" }],
       [{ text: "🌐 Прокси", callback_data: "proxies" }],
       [{ text: "🏷 Сменить ник", callback_data: "change_nick" }],
+      [{ text: "⛔ Остановить всё", callback_data: "stop_all" }],
+      [{ text: "🗑 Удалить все аккаунты", callback_data: "delete_all_accounts" }],
       [{ text: "📊 Статус", callback_data: "status" }]
     ]
   };
@@ -537,7 +545,8 @@ bot.on("message", async msg => {
     const acc = {
       id, name: name.trim(), login: login.trim(), password: password.trim(),
       niche: nicheStr ? nicheStr.split(',').map(s => s.trim().toLowerCase()) : null,
-      proxy, fingerprint, cookies: null, status: "new", postsCount: 0
+      proxy, fingerprint, cookies: null, status: "new", postsCount: 0,
+      profileUrl: null
     };
     acc.uploader = new TikTokMobile({
       deviceId: fingerprint?.deviceId || null,
@@ -603,6 +612,64 @@ bot.on("callback_query", async q => {
   const s = sessions.get(chatId);
   const data = q.data;
 
+  /* --- СТОП ВСЕГО --- */
+  if (data === "stop_all") {
+    await bot.answerCallbackQuery(q.id);
+    stopFlags.factory = true;
+    stopFlags.warm = true;
+    stopFlags.post = true;
+    return bot.sendMessage(chatId,
+      "⛔ *Сигнал остановки отправлен*\n\n" +
+      "Все активные процессы прекратятся после текущей операции.\n" +
+      "Прокси освободятся автоматически.",
+      { parse_mode: "Markdown" });
+  }
+
+  /* --- УДАЛИТЬ ВСЕ АККАУНТЫ --- */
+  if (data === "delete_all_accounts") {
+    await bot.answerCallbackQuery(q.id);
+    return bot.sendMessage(chatId,
+      `⚠️ *Удалить все аккаунты?*\n\n` +
+      `Будет удалено: ${accounts.size} аккаунтов\n` +
+      `База данных очищена\n` +
+      `Прокси освобождены\n\n` +
+      `Это действие *нельзя отменить*.`,
+      {
+        parse_mode: "Markdown",
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "🗑 ДА, УДАЛИТЬ ВСЁ", callback_data: "delete_all_confirm" }],
+            [{ text: "❌ Отмена", callback_data: "delete_all_cancel" }]
+          ]
+        }
+      });
+  }
+
+  if (data === "delete_all_confirm") {
+    await bot.answerCallbackQuery(q.id);
+    try {
+      const count = accounts.size;
+      // Освобождаем прокси и удаляем из памяти
+      for (const [id, acc] of accounts) {
+        if (acc.proxy?.id) {
+          await store.releaseProxyAtomic(acc.proxy.id).catch(() => {});
+        }
+      }
+      accounts.clear();
+      // Чистим базу
+      await store.deleteAllAccounts();
+      return bot.sendMessage(chatId, `✅ Удалено аккаунтов: ${count}. База очищена.`);
+    } catch (e) {
+      return bot.sendMessage(chatId, `❌ Ошибка удаления: ${e.message}`);
+    }
+  }
+
+  if (data === "delete_all_cancel") {
+    await bot.answerCallbackQuery(q.id);
+    return bot.sendMessage(chatId, "❌ Удаление отменено.");
+  }
+
+  /* --- МЕНЮ --- */
   if (data === "add_account") {
     await bot.answerCallbackQuery(q.id);
     return bot.sendMessage(chatId,
@@ -616,10 +683,20 @@ bot.on("callback_query", async q => {
     let txt = `📋 *Аккаунты (${accounts.size}):*\n\n`;
     let i = 1;
     for (const [id, acc] of accounts) {
-      txt += `${i++}. *${acc.name}* (\`${id}\`)\n   ${acc.login} | ${acc.status}\n\n`;
+      txt += `${i++}. *${acc.name}* (\`${id}\`)\n`;
+      txt += `   ${acc.login} | ${acc.status}\n`;
+      if (acc.profileUrl) {
+        txt += `   🔗 [Профиль](${acc.profileUrl})\n`;
+      } else {
+        txt += `   🔗 нет ссылки\n`;
+      }
+      txt += `\n`;
       if (i > 30) { txt += `... и ещё ${accounts.size - 30}\n`; break; }
     }
-    return bot.sendMessage(chatId, txt, { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, txt, {
+      parse_mode: "Markdown",
+      disable_web_page_preview: true
+    });
   }
 
   if (data === "status") {
@@ -627,6 +704,7 @@ bot.on("callback_query", async q => {
     const stats = await store.proxyStats();
     let txt = `📊 *Статус*\n\nАккаунтов: ${accounts.size}\nСессий: ${sessions.size}\n\n`;
     txt += `Прокси: всего ${stats.total}\n🟢 free: ${stats.free}\n🔴 busy: ${stats.busy}\n💀 dead: ${stats.dead}\n\n`;
+    txt += `⛔ Остановка: фабрика=${stopFlags.factory} прогрев=${stopFlags.warm} постинг=${stopFlags.post}\n\n`;
     const accStats = {};
     for (const acc of accounts.values()) accStats[acc.status] = (accStats[acc.status] || 0) + 1;
     for (const [st, cnt] of Object.entries(accStats)) txt += `${st}: ${cnt}\n`;
@@ -649,6 +727,7 @@ bot.on("callback_query", async q => {
 
   if (data === "factory") {
     await bot.answerCallbackQuery(q.id);
+    stopFlags.factory = false;
     factoryJobs.set(chatId, { waiting: "count" });
     return bot.sendMessage(chatId, "🏭 Сколько аккаунтов создать? (1..100)");
   }
@@ -705,6 +784,7 @@ bot.on("callback_query", async q => {
 
   if (data === "warm_all") {
     await bot.answerCallbackQuery(q.id);
+    stopFlags.warm = false;
     return startWarmAll(chatId);
   }
 
@@ -762,6 +842,7 @@ bot.on("callback_query", async q => {
     const id = data.slice(5);
     await bot.answerCallbackQuery(q.id);
     if (!s?.rendered) return bot.sendMessage(chatId, "❌ Сначала баннер.");
+    stopFlags.post = false;
     return startPost(chatId, id, s);
   }
 });
@@ -796,19 +877,21 @@ bot.on("message", async msg => {
 });
 
 /* ============================================================
- *  ФАБРИКА
+ *  ФАБРИКА (с остановкой)
  * ============================================================ */
 
 async function startFactory(chatId, job) {
   const { count, niche } = job;
   factoryJobs.delete(chatId);
+  stopFlags.factory = false;
 
   const stats = await store.proxyStats();
   await bot.sendMessage(chatId,
     `🏭 *Фабрика запущена*\n\n` +
     `Аккаунтов: ${count}\nНиша: ${niche ? niche.join(', ') : 'общая'}\n` +
     `Прокси: ${stats.free} free / ${stats.total} всего\n` +
-    `Параллельность: 10\nОжидаемое время: ~${Math.ceil(count / 10 * 1.5)} мин`,
+    `Параллельность: 10\n\n` +
+    `⛔ Для остановки: /menu → ⛔ Остановить всё`,
     { parse_mode: "Markdown" });
 
   let lastUpdate = 0;
@@ -816,6 +899,7 @@ async function startFactory(chatId, job) {
     const r = await factory.createBatch({
       count, concurrency: 10, niche, startSeq: 1,
       log: (m) => console.log(m),
+      shouldStop: () => stopFlags.factory,
       onProgress: async ({ done, total, ok, fail, inFlight, elapsed }) => {
         if (Date.now() - lastUpdate < 30000) return;
         lastUpdate = Date.now();
@@ -840,7 +924,8 @@ async function startFactory(chatId, job) {
     const min = Math.floor(r.elapsed / 60);
     const sec = r.elapsed % 60;
     await bot.sendMessage(chatId,
-      `✅ *Фабрика завершена*\n\nСоздано: ${r.ok.length}\nОшибок: ${r.fail.length}\nВремя: ${min}м ${sec}с\nСкорость: ${(count / (r.elapsed / 60)).toFixed(1)} акк/мин\n\n` +
+      `✅ *Фабрика завершена*${r.stopped ? ' (ОСТАНОВЛЕНА)' : ''}\n\n` +
+      `Создано: ${r.ok.length}\nОшибок: ${r.fail.length}\nВремя: ${min}м ${sec}с\n\n` +
       (r.fail.length ? `*Причины:*\n` + Object.entries(r.fail.reduce((a, f) => { a[f.reason] = (a[f.reason] || 0) + 1; return a; }, {})).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `• ${k}: ${v}`).join('\n') : ''),
       { parse_mode: "Markdown" });
   } catch (e) {
@@ -850,7 +935,7 @@ async function startFactory(chatId, job) {
 }
 
 /* ============================================================
- *  ПРОГРЕВ
+ *  ПРОГРЕВ (с остановкой)
  * ============================================================ */
 
 async function startWarm(chatId, id) {
@@ -861,7 +946,7 @@ async function startWarm(chatId, id) {
   await bot.sendMessage(chatId, `🔥 Прогрев ${acc.name}...`);
   try {
     const warmer = new TikTokMobileWarmer(acc.uploader);
-    await warmer.warmAccount(3, 20);
+    await warmer.warmAccount(3, 20, () => stopFlags.warm);
     acc.status = "warmed";
     await store.updateStatus(id, "warmed");
     await bot.sendMessage(chatId, `✅ ${acc.name} прогрет!`);
@@ -874,9 +959,13 @@ async function startWarm(chatId, id) {
 
 async function startWarmAll(chatId) {
   if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
-  await bot.sendMessage(chatId, `🔥 Прогреваю ${accounts.size} последовательно...`);
+  await bot.sendMessage(chatId, `🔥 Прогреваю ${accounts.size} последовательно...\n⛔ Стоп: /menu → ⛔ Остановить всё`);
   let done = 0;
   for (const [id, acc] of accounts) {
+    if (stopFlags.warm) {
+      await bot.sendMessage(chatId, `⛔ Остановлено на ${done}/${accounts.size}`);
+      return;
+    }
     if (acc.status === 'warming') continue;
     try { await startWarm(chatId, id); } catch {}
     done++;
