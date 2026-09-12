@@ -2,7 +2,7 @@ const crypto = require('crypto');
 
 const UA_LIST = [
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -27,18 +27,7 @@ const TIMEZONES = [
   { tz: 'Australia/Sydney', geo: { latitude: -33.8688, longitude: 151.2093 }, locale: 'en-AU' }
 ];
 
-const PLATFORMS = ['Win32', 'MacIntel'];
-
-function pick(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-function randInt(min, max) { return Math.floor(Math.random() * (max - min) + min); }
-
-/**
- * Генерирует полный фингерпринт для одного аккаунта.
- * Один и тот же аккаунт всегда получает один и тот же fingerprint,
- * потому что мы передаём seed (id аккаунта).
- */
 function generateFingerprint(seed) {
-  // Deterministic seeded RNG
   const hash = crypto.createHash('sha256').update(String(seed)).digest();
   let idx = 0;
   const rand = () => {
@@ -54,7 +43,6 @@ function generateFingerprint(seed) {
   const tz = pickSeeded(TIMEZONES);
   const platform = ua.includes('Macintosh') ? 'MacIntel' : 'Win32';
 
-  // Canvas/WebGL шум — уникальная строка
   const canvasNoise = crypto.createHash('md5').update(`${seed}-canvas`).digest('hex');
 
   return {
@@ -83,23 +71,15 @@ function generateFingerprint(seed) {
   };
 }
 
-/**
- * Возвращает init-script для Playwright — внедряется в страницу
- * до любого JS и подменяет navigator, WebGL, canvas и т.д.
- */
 function fingerprintInitScript(fp) {
   return `
     (() => {
-      // webdriver
       Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-
-      // platform / languages
       Object.defineProperty(navigator, 'platform', { get: () => '${fp.platform}' });
       Object.defineProperty(navigator, 'languages', { get: () => ['${fp.locale}', '${fp.locale.split('-')[0]}'] });
       Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => ${fp.hardwareConcurrency} });
       Object.defineProperty(navigator, 'deviceMemory', { get: () => ${fp.deviceMemory} });
 
-      // plugins — фейковый список
       Object.defineProperty(navigator, 'plugins', {
         get: () => [
           { name: 'PDF Viewer', filename: 'internal-pdf-viewer' },
@@ -108,7 +88,6 @@ function fingerprintInitScript(fp) {
         ]
       });
 
-      // WebGL
       const getParameter = WebGLRenderingContext.prototype.getParameter;
       WebGLRenderingContext.prototype.getParameter = function(p) {
         if (p === 37445) return '${fp.webglVendor}';
@@ -116,7 +95,6 @@ function fingerprintInitScript(fp) {
         return getParameter.call(this, p);
       };
 
-      // Canvas fingerprint noise
       const toDataURL = HTMLCanvasElement.prototype.toDataURL;
       HTMLCanvasElement.prototype.toDataURL = function(...args) {
         const ctx = this.getContext('2d');
@@ -135,10 +113,8 @@ function fingerprintInitScript(fp) {
         return toDataURL.apply(this, args);
       };
 
-      // chrome.runtime
       window.chrome = { runtime: {} };
 
-      // permissions
       const originalQuery = window.navigator.permissions.query;
       window.navigator.permissions.query = (parameters) => (
         parameters.name === 'notifications'
