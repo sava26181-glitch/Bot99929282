@@ -11,12 +11,8 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false
-      - key: SIGNER_API
-        sync: false
-      - key: SIGNER_KEY
-        sync: false
       - key: GLOBAL_BIO
-        value: "депать последние деньги только тут\n👉 zenodrop.fun\n👉тгк: zenodrp"
+        value: "депать послед zenodrop.fun\n👉тгк: zenodrp"
       - key: INSERT_AT_SECONDS
         value: "5"
       - key: BANNER_DURATION
