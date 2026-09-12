@@ -1,0 +1,14 @@
+services:
+  - type: worker
+    name: zenodrop-banner-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: INSERT_AT_SECONDS
+        value: "5"
+      - key: BANNER_DURATION
+        value: "4"
+      - key: MAX_VIDEO_MB
+        value: "49"
