@@ -595,4 +595,39 @@ class TikTokUploader {
         }
         await this.humanDelay(200, 500);
       }
-      await this.page.keyboard.type(tag, { delay:
+      await this.page.keyboard.type(tag, { delay: Math.random() * 100 + 50 });
+      await this.humanDelay(300, 1000);
+      if (i < hashtags.length - 1) {
+        if (Math.random() < 0.7) await this.page.keyboard.type(' ', { delay: 60 });
+        else await this.page.keyboard.press('Enter');
+        await this.humanDelay(200, 600);
+      }
+    }
+
+    await this.humanDelay(1500, 3000);
+    await this.humanDelay(2000, 5000);
+
+    const postButton = await this.page.$('button[data-e2e="post_video_button"], button:has-text("Post")');
+    if (!postButton) throw new Error('Post button not found');
+    await postButton.click();
+    await this.page.waitForTimeout(12000);
+
+    const currentUrl = this.page.url();
+    await this.saveCookies();
+    return { success: true, url: currentUrl, hashtags };
+  }
+
+  async close() {
+    try { await this.saveCookies(); } catch {}
+    try { if (this.browser) await this.browser.close(); } catch {}
+    this.browser = null;
+    this.context = null;
+    this.page = null;
+  }
+}
+
+module.exports = TikTokUploader;
+module.exports.buildHashtags = buildHashtags;
+module.exports.refreshTrending = refreshTrending;
+module.exports.BRAND_TAG = BRAND_TAG;
+module.exports.DEFAULT_BIO = DEFAULT_BIO;
