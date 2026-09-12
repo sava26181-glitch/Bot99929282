@@ -1,12 +1,14 @@
 {
-  "name": "zenodrop-banner-bot",
-  "version": "3.0.0",
+  "name": "zenodrop-tiktok-bot",
+  "version": "4.0.0",
   "private": true,
   "main": "bot.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "postinstall": "npx playwright install chromium --with-deps || true"
   },
   "dependencies": {
-    "node-telegram-bot-api": "^0.66.0"
+    "node-telegram-bot-api": "^0.66.0",
+    "playwright": "^1.40.0"
   }
 }
