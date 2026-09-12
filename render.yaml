@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: zenodrop-farm
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: frankfurt
+    healthCheckPath: /health
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: GLOBAL_BIO
+        value: "депать послед zenodrop.fun\n👉тгк: zenodrp"
+      - key: INSERT_AT_SECONDS
+        value: "5"
+      - key: BANNER_DURATION
+        value: "4"
+      - key: MAX_VIDEO_MB
+        value: "49"
