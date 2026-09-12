@@ -1,326 +1,106 @@
-const crypto = require('crypto');
 const https = require('https');
-const fs = require('fs');
-const path = require('path');
-const { generateFingerprint } = require('./fingerprint');
-const TikTokUploader = require('./tiktok_uploader');
-const { acquireProxyForAccount } = require('./proxy_manager');
-const store = require('./accounts_store');
+const { signTikTokRequest } = require('./signer_bridge');
 
-const DEFAULT_BIO = process.env.GLOBAL_BIO ||
-  'депать последние деньги только тут\n👉 zenodrop.fun\n👉тгк: zenodrp';
+const MOBILE_API_HOST = 'api16-normal-c-useast1a.tiktokv.com';
+const DEVICE_REGISTER_PATH = '/service/2/device_register/';
 
-/* ============================================================
- *  EMAIL-ПРОВАЙДЕРЫ
- * ============================================================ */
+/**
+ * Регистрирует device_id на серверах TikTok.
+ * Возвращает валидный device_id + iid, которые потом используются
+ * для всех запросов аккаунта.
+ */
+async function registerDevice(proxy) {
+  const params = {
+    aid: 1233,              // TikTok Global
+    device_id: 0,
+    iid: 0,
+    device_type: 'Pixel 7',
+    device_brand: 'google',
+    os_version: '13',
+    os_api: 33,
+    openudid: generateOpenUDID(),
+    cdid: generateUUID(),
+    version_code: 300904,
+    version_name: '30.9.4',
+    manifest_version_code: 2023009040,
+    update_version_code: 2023009040,
+    channel: 'googleplay',
+    app_type: 'normal',
+    resolution: '1080*2400',
+    dpi: 420,
+    language: 'en',
+    os: 'android',
+    timezone_name: 'America/New_York',
+    timezone_offset: '-14400',
+    _rticket: Date.now(),
+    ts: Math.floor(Date.now() / 1000)
+  };
 
-async function createMailTm() {
-  const domainRes = await fetchJson('https://api.mail.tm/domains?page=1');
-  const domain = domainRes['hydra:member'][0].domain;
+  // Генерим подписи
+  const sig = await signTikTokRequest(params, null, { version: 8404 });
+  
+  const headers = {
+    'User-Agent': 'com.zhiliaoapp.musically/2023009040 (Linux; U; Android 13; en_US; Pixel 7; Build/TQ3A.230805.001;tt-ok/3.12.13.4-tiktok)',
+    'x-argus': sig['x-argus'],
+    'x-gorgon': sig['x-gorgon'],
+    'x-ladon': sig['x-ladon'],
+    'x-khronos': sig['x-khronos'],
+    'x-ss-req-ticket': sig['x-ss-req-ticket'],
+    'x-ss-stub': sig['x-ss-stub'],
+    'Content-Type': 'application/json'
+  };
 
-  const addr = `${randStr(10)}@${domain}`;
-  const password = randStr(16);
-
-  await fetchJson('https://api.mail.tm/accounts', {
-    method: 'POST',
-    body: { address: addr, password }
-  });
-
-  const token = await fetchJson('https://api.mail.tm/token', {
-    method: 'POST',
-    body: { address: addr, password }
-  });
-
+  // Отправляем device_register
+  const result = await httpPost(`https://${MOBILE_API_HOST}${DEVICE_REGISTER_PATH}`, headers, {}, proxy);
+  
   return {
-    email: addr,
-    password,
-    token: token.token,
-    provider: 'mail.tm',
-    getMessages: async () => {
-      const list = await fetchJson('https://api.mail.tm/messages', {
-        headers: { 'Authorization': `Bearer ${token.token}` }
-      });
-      return list['hydra:member'] || [];
-    },
-    readMessage: async (id) => fetchJson(`https://api.mail.tm/messages/${id}`, {
-      headers: { 'Authorization': `Bearer ${token.token}` }
-    })
+    device_id: result.device_id_str || result.device_id,
+    iid: result.iid,
+    install_id: result.install_id
   };
 }
 
-async function create1SecMail() {
-  const domains = ['1secmail.com', '1secmail.net', '1secmail.org'];
-  const domain = domains[Math.floor(Math.random() * domains.length)];
-  const login = randStr(10).toLowerCase();
-  const email = `${login}@${domain}`;
-
-  return {
-    email,
-    password: null,
-    provider: '1secmail',
-    getMessages: async () => {
-      const list = await fetchJson(
-        `https://www.1secmail.com/api/v1/?action=getMessages&login=${login}&domain=${domain}`
-      );
-      return Array.isArray(list) ? list : [];
-    },
-    readMessage: async (id) => fetchJson(
-      `https://www.1secmail.com/api/v1/?action=readMessage&login=${login}&domain=${domain}&id=${id}`
-    )
-  };
+function generateOpenUDID() {
+  return require('crypto').randomBytes(16).toString('hex');
 }
 
-async function createGuerrilla() {
-  const init = await fetchJson('https://api.guerrillaemail.com/ajax.php?f=get_email_address');
-  const email = init.email_addr;
-  const sid = init.sid_token;
-
-  return {
-    email,
-    password: null,
-    provider: 'guerrilla',
-    getMessages: async () => {
-      const list = await fetchJson(
-        `https://api.guerrillaemail.com/ajax.php?f=get_email_list&offset=0&sid_token=${sid}`
-      );
-      return list.list || [];
-    },
-    readMessage: async (id) => fetchJson(
-      `https://api.guerrillaemail.com/ajax.php?f=fetch_email&email_id=${id}&sid_token=${sid}`
-    )
-  };
+function generateUUID() {
+  return require('crypto').randomUUID();
 }
 
-function randStr(n) {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let s = '';
-  for (let i = 0; i < n; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
-}
-
-function fetchJson(url, opts = {}) {
+async function httpPost(url, headers, body, proxy) {
   return new Promise((resolve, reject) => {
-    const body = opts.body ? JSON.stringify(opts.body) : null;
     const u = new URL(url);
-    const req = https.request({
+    const data = JSON.stringify(body);
+    
+    const opts = {
       hostname: u.hostname,
       path: u.pathname + u.search,
-      method: opts.method || 'GET',
+      method: 'POST',
       headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-        ...(opts.headers || {}),
-        ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {})
-      },
-      timeout: 20000
-    }, res => {
-      let data = '';
-      res.on('data', c => data += c);
+        ...headers,
+        'Content-Length': Buffer.byteLength(data)
+      }
+    };
+
+    if (proxy) {
+      // Для прокси нужно использовать агент или отдельную либу
+      // Здесь упрощённо — для работы без прокси
+    }
+
+    const req = https.request(opts, res => {
+      let out = '';
+      res.on('data', c => out += c);
       res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { resolve(data); }
+        try { resolve(JSON.parse(out)); }
+        catch { resolve({ raw: out }); }
       });
     });
     req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-    if (body) req.write(body);
+    req.write(data);
     req.end();
   });
 }
 
-/* ============================================================
- *  ГЕНЕРАЦИЯ УЧЁТОК
- * ============================================================ */
-
-function randomPassword(len = 14) {
-  const chars = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$';
-  let s = '';
-  for (let i = 0; i < len; i++) s += chars[Math.floor(Math.random() * chars.length)];
-  return s;
-}
-
-function randomBirthDate() {
-  return {
-    month: 1 + Math.floor(Math.random() * 12),
-    day: 1 + Math.floor(Math.random() * 28),
-    year: 1985 + Math.floor(Math.random() * 15)
-  };
-}
-
-function zenodropNickname(seq) {
-  const suffix = String(seq).padStart(4, '0');
-  return `zenodrop_${suffix}`;
-}
-
-/* ============================================================
- *  СОЗДАНИЕ ОДНОГО АККАУНТА
- * ============================================================ */
-
-async function createOneAccount({
-  seq,
-  emailProvider = 'mail.tm',
-  nickname,
-  niche,
-  proxy,
-  log = console.log
-}) {
-  log(`[factory] #${seq} создаю почту...`);
-  let mailer;
-  if (emailProvider === 'mail.tm') mailer = await createMailTm();
-  else if (emailProvider === '1secmail') mailer = await create1SecMail();
-  else mailer = await createGuerrilla();
-
-  log(`[factory] #${seq} email=${mailer.email}`);
-
-  const password = randomPassword();
-  const nick = nickname || zenodropNickname(seq);
-  const birthDate = randomBirthDate();
-  const id = crypto.randomUUID().slice(0, 12);
-
-  let usedProxy = proxy;
-  if (!usedProxy) {
-    usedProxy = await acquireProxyForAccount(id, null);
-  }
-
-  if (!usedProxy) {
-    throw new Error('Нет свободных прокси в пуле');
-  }
-
-  const fingerprint = generateFingerprint(id);
-
-  const uploader = new TikTokUploader({
-    proxy: usedProxy,
-    fingerprint,
-    headless: process.env.HEADLESS !== 'false',
-    cookiesPath: null,
-    accountId: id
-  });
-
-  try {
-    await uploader.init();
-
-    log(`[factory] #${seq} регистрирую...`);
-    const result = await uploader.signup(mailer.email, password, nick, birthDate);
-
-    if (result.captcha) {
-      await uploader.close();
-      return { success: false, reason: 'captcha', email: mailer.email };
-    }
-
-    if (result.needsCode) {
-      log(`[factory] #${seq} жду код...`);
-      let code = null;
-      for (let attempt = 0; attempt < 30 && !code; attempt++) {
-        await new Promise(r => setTimeout(r, 6000));
-        const messages = await mailer.getMessages();
-        for (const msg of messages) {
-          const full = await mailer.readMessage(msg.id || msg.mail_id);
-          const text = JSON.stringify(full);
-          const m = text.match(/\b(\d{6})\b/);
-          if (m) { code = m[1]; break; }
-        }
-      }
-      if (!code) {
-        await uploader.close();
-        return { success: false, reason: 'no_code', email: mailer.email };
-      }
-      log(`[factory] #${seq} code=${code}`);
-      const sub = await uploader.submitSignupCode(code);
-      if (sub.error) {
-        await uploader.close();
-        return { success: false, reason: sub.error, email: mailer.email };
-      }
-    }
-
-    log(`[factory] #${seq} ставлю ник ${nick}...`);
-    await uploader.setNickname(nick).catch(e => log(`[factory] #${seq} nick err: ${e.message}`));
-
-    // Аватарка
-    const avatarPath = path.join(__dirname, 'avatar.png');
-    if (fs.existsSync(avatarPath)) {
-      log(`[factory] #${seq} ставлю аватарку...`);
-      await uploader.setAvatar(avatarPath).catch(e => log(`[factory] #${seq} avatar err: ${e.message}`));
-    }
-
-    // Био
-    log(`[factory] #${seq} ставлю био...`);
-    await uploader.setBio(DEFAULT_BIO).catch(e => log(`[factory] #${seq} bio err: ${e.message}`));
-
-    const cookies = await uploader.saveCookies();
-    await uploader.close();
-
-    const acc = {
-      id,
-      name: nick,
-      login: mailer.email,
-      password,
-      niche: niche || null,
-      proxy: usedProxy,
-      fingerprint,
-      cookies,
-      status: 'ready',
-      postsCount: 0
-    };
-    await store.saveAccount(acc);
-
-    log(`[factory] #${seq} OK → ${mailer.email} / ${nick}`);
-    return { success: true, account: acc };
-  } catch (e) {
-    log(`[factory] #${seq} ERROR: ${e.message}`);
-    try { await uploader.close(); } catch {}
-    return { success: false, reason: e.message, email: mailer.email };
-  }
-}
-
-/* ============================================================
- *  МАССОВОЕ СОЗДАНИЕ
- * ============================================================ */
-
-async function createBatch({
-  count,
-  emailProvider = 'mail.tm',
-  niche,
-  startSeq = 1,
-  concurrency = 2,
-  log = console.log,
-  onProgress = null
-}) {
-  const results = { ok: [], fail: [] };
-  const queue = Array.from({ length: count }, (_, i) => startSeq + i);
-
-  async function worker() {
-    while (queue.length) {
-      const seq = queue.shift();
-      if (seq === undefined) return;
-
-      const r = await createOneAccount({
-        seq,
-        emailProvider,
-        niche,
-        log
-      });
-      if (r.success) results.ok.push(r.account);
-      else results.fail.push({ seq, reason: r.reason });
-
-      if (onProgress) {
-        try { await onProgress({ done: results.ok.length + results.fail.length, total: count, last: r }); } catch {}
-      }
-    }
-  }
-
-  const workers = Array.from({ length: Math.max(1, Math.min(concurrency, 5)) }, () => worker());
-  await Promise.all(workers);
-
-  return results;
-}
-
-module.exports = {
-  createOneAccount,
-  createBatch,
-  createMailTm,
-  create1SecMail,
-  createGuerrilla,
-  zenodropNickname,
-  DEFAULT_BIO
-};
+// Экспортируем для использования в createOneAccount
+module.exports = { registerDevice, ... };
