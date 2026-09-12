@@ -5,7 +5,6 @@ const path = require('path');
 const { signTikTokRequest } = require('./signer_bridge');
 
 const MOBILE_API_HOST = 'api16-normal-c-useast1a.tiktokv.com';
-const UPLOAD_HOST = 'api16-normal-c-useast1a.tiktokv.com';
 
 const BROAD_TAGS = [
   'fyp', 'foryou', 'foryoupage', 'viral', 'trending',
@@ -72,7 +71,7 @@ function buildHashtags(options = {}) {
     brand,
     ...pickRandom(geo, count.geo),
     ...pickRandom(seasonal, count.seasonal),
-...pickRandom(TRENDING_CACHE, count.trending),
+    ...pickRandom(TRENDING_CACHE, count.trending),
     ...extra
   ];
 
@@ -83,7 +82,7 @@ function buildHashtags(options = {}) {
     unique.splice(brandIdx, 1);
     unique.splice(Math.min(4, unique.length), 0, brandLower);
   }
-  return unique.map(t => `#${t}`);
+  return unique.map(t => '#' + t);
 }
 
 function fetchTrendingHashtags(region = 'US', period = 7) {
@@ -118,10 +117,6 @@ async function refreshTrending() {
   return TRENDING_CACHE;
 }
 
-/* ============================================================
- *  HTTP ХЕЛПЕР
- * ============================================================ */
-
 function httpRequest(url, options, body = null) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
@@ -149,10 +144,6 @@ function httpRequest(url, options, body = null) {
     req.end();
   });
 }
-
-/* ============================================================
- *  TIKTOK MOBILE API
- * ============================================================ */
 
 class TikTokMobile {
   constructor(config = {}) {
@@ -182,6 +173,7 @@ class TikTokMobile {
       os_api: 33,
       resolution: '1080*2400',
       dpi: 420,
+      language: 'en',
       os: 'android',
       timezone_name: 'America/New_York',
       timezone_offset: '-14400',
@@ -215,10 +207,8 @@ class TikTokMobile {
     const allParams = { ...this.baseParams(), ...params };
     const sig = await signTikTokRequest(allParams, payload, { version: 8404 });
     const headers = this.headersFor(sig);
-
     const body = new URLSearchParams(allParams).toString();
     const url = `https://${MOBILE_API_HOST}${pathname}?${body}`;
-
     const res = await httpRequest(url, { method: payload ? 'POST' : 'GET', headers }, payload);
     return res.data;
   }
@@ -229,6 +219,43 @@ class TikTokMobile {
     else if (result.device_id) this.deviceId = String(result.device_id);
     if (result.iid) this.iid = result.iid;
     if (result.install_id) this.installId = result.install_id;
+    return result;
+  }
+
+  async signup(email, password, username, birthDate = { month: 6, day: 15, year: 1995 }) {
+    const params = {
+      email,
+      password,
+      username,
+      birthday: `${birthDate.year}-${String(birthDate.month).padStart(2, '0')}-${String(birthDate.day).padStart(2, '0')}`,
+      mix_mode: '1'
+    };
+
+    const result = await this.signedRequest('/passport/user/register/', params);
+
+    if (result.message === 'captcha' || result.data?.captcha || result.error_code === 10001) {
+      return { captcha: true };
+    }
+    if (result.data?.need_verify || result.message === 'verify') {
+      return { needsCode: true, email };
+    }
+    if (result.data?.session_key) {
+      this.cookies = `sessionid=${result.data.session_key}`;
+      if (this.onCookies) await this.onCookies(this.cookies);
+      return { success: true };
+    }
+    return { success: false, raw: result };
+  }
+
+  async submitSignupCode(code) {
+    const result = await this.signedRequest('/passport/user/verify/', {
+      code,
+      type: 'email'
+    });
+    if (result.data?.session_key) {
+      this.cookies = `sessionid=${result.data.session_key}`;
+      if (this.onCookies) await this.onCookies(this.cookies);
+    }
     return result;
   }
 
@@ -258,8 +285,6 @@ class TikTokMobile {
   }
 
   async setAvatar(imagePath) {
-    // Загрузка аватарки через upload endpoint
-    // Требует multipart — упрощённая версия
     if (!fs.existsSync(imagePath)) throw new Error('image not found');
     const imageData = fs.readFileSync(imagePath).toString('base64');
     return this.signedRequest('/aweme/v1/upload/image/', {
@@ -272,7 +297,6 @@ class TikTokMobile {
     const stat = fs.statSync(videoPath);
     const size = stat.size;
 
-    // Шаг 1: запрос на upload
     const initResult = await this.signedRequest('/aweme/v1/upload/create/', {
       video_size: size,
       video_type: 'mp4'
@@ -282,7 +306,6 @@ class TikTokMobile {
       throw new Error('No upload_url: ' + JSON.stringify(initResult).slice(0, 300));
     }
 
-    // Шаг 2: PUT видео на upload_url
     await new Promise((resolve, reject) => {
       const u = new URL(initResult.upload_url);
       const req = https.request({
@@ -303,7 +326,6 @@ class TikTokMobile {
       fs.createReadStream(videoPath).pipe(req);
     });
 
-    // Шаг 3: финализация — публикация
     const hashtags = options.hashtags && options.hashtags.length
       ? options.hashtags
       : buildHashtags({ niche: options.niche, extra: options.extra });
@@ -316,17 +338,9 @@ class TikTokMobile {
       video_id: initResult.video_id || ''
     });
 
-    return {
-      success: true,
-      hashtags,
-      data: publishResult
-    };
+    return { success: true, hashtags, data: publishResult };
   }
 }
-
-/* ============================================================
- *  ЭКСПОРТ
- * ============================================================ */
 
 module.exports = TikTokMobile;
 module.exports.buildHashtags = buildHashtags;
