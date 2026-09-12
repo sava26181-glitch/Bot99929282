@@ -72,7 +72,7 @@ function buildHashtags(options = {}) {
     brand,
     ...pickRandom(geo, count.geo),
     ...pickRandom(seasonal, count.seasonal),
-    ...pickRandom(TRENDING_CACHE, count.t     rending),
+...pickRandom(TRENDING_CACHE, count.trending),
     ...extra
   ];
 
