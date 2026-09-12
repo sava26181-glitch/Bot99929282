@@ -811,21 +811,87 @@ async function startFactory(chatId, job) {
   const { count, niche } = job;
   factoryJobs.delete(chatId);
 
+  const stats = await store.proxyStats();
   await bot.sendMessage(chatId,
-    `🏭 Запускаю создание ${count} аккаунтов...\nНиша: ${niche ? niche.join(', ') : 'общая'}`);
+    `🏭 *Фабрика запущена*\n\n` +
+    `Аккаунтов: ${count}\n` +
+    `Ниша: ${niche ? niche.join(', ') : 'общая'}\n` +
+    `Прокси: ${stats.free} free / ${stats.total} всего\n` +
+    `Параллельность: 10\n\n` +
+    `Ожидаемое время: ~${Math.ceil(count / 10 * 1.5)} мин`,
+    { parse_mode: "Markdown" });
+
+  if (stats.free < 5) {
+    await bot.sendMessage(chatId,
+      `⚠️ Свободных прокси мало (${stats.free}). ` +
+      `TikTok будет банить. Рекомендую залить ещё прокси.`);
+  }
+
+  let lastUpdate = 0;
 
   try {
     const r = await factory.createBatch({
       count,
-      emailProvider: 'mail.tm',
+      concurrency: 10,
       niche,
       startSeq: 1,
-      concurrency: 2,
       log: (m) => console.log(m),
-      onProgress: async ({ done, total, last }) => {
-        if (done % 5 === 0 || done === total) {
-          await bot.sendMessage(chatId, `⏳ ${done}/${total} (последний: ${last.success ? '✅' : '❌ ' + last.reason})`).catch(() => {});
-        }
+      onProgress: async ({ done, total, ok, fail, inFlight, elapsed }) => {
+        // Обновляем не чаще чем раз в 30 секунд
+        if (Date.now() - lastUpdate < 30000) return;
+        lastUpdate = Date.now();
+
+        const pct = Math.floor(done / total * 100);
+        const bar = '█'.repeat(Math.floor(pct / 5)) + '░'.repeat(20 - Math.floor(pct / 5));
+
+        await bot.sendMessage(chatId,
+          `🏭 *Прогресс*\n\n${bar} ${pct}%\n\n` +
+          `✅ OK: ${ok}\n❌ Fail: ${fail}\n` +
+          `🔄 В работе: ${inFlight}\n` +
+          `⏱ Прошло: ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`,
+          { parse_mode: "Markdown" }).catch(() => {});
+      }
+    });
+
+    // Загружаем созданные в память
+    for (const acc of r.ok) {
+      acc.uploader = new TikTokMobile({
+        deviceId: acc.fingerprint?.deviceId || null,
+        proxy: acc.proxy,
+        fingerprint: acc.fingerprint,
+        cookies: acc.cookies,
+        accountId: acc.id,
+        onCookies: async (cks) => { await store.saveCookies(acc.id, cks); }
+      });
+      accounts.set(acc.id, acc);
+    }
+
+    const min = Math.floor(r.elapsed / 60);
+    const sec = r.elapsed % 60;
+
+    await bot.sendMessage(chatId,
+      `✅ *Фабрика завершена*\n\n` +
+      `Создано: ${r.ok.length}\n` +
+      `Ошибок: ${r.fail.length}\n` +
+      `Время: ${min} мин ${sec} сек\n` +
+      `Скорость: ${(count / (r.elapsed / 60)).toFixed(1)} акк/мин\n\n` +
+      (r.fail.length
+        ? `*Причины ошибок:*\n` +
+          Object.entries(
+            r.fail.reduce((acc, f) => {
+              acc[f.reason] = (acc[f.reason] || 0) + 1;
+              return acc;
+            }, {})
+          ).sort((a, b) => b[1] - a[1]).slice(0, 5)
+            .map(([k, v]) => `• ${k}: ${v}`).join('\n')
+        : ''),
+      { parse_mode: "Markdown" });
+
+  } catch (e) {
+    console.error('factory error:', e);
+    await bot.sendMessage(chatId, `❌ Фабрика упала: ${e.message}`);
+  }
+}
       }
     });
 
