@@ -11,9 +11,7 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: DATABASE_URL
-        fromDatabase:
-          name: zenodrop-db
-          property: connectionString
+        sync: false
       - key: GLOBAL_BIO
         value: "депать последние деньги только тут\n👉 zenodrop.fun\n👉тгк: zenodrp"
       - key: INSERT_AT_SECONDS
@@ -24,9 +22,3 @@ services:
         value: "49"
       - key: HEADLESS
         value: "true"
-
-databases:
-  - name: zenodrop-db
-    plan: free
-    databaseName: zenodrop
-    user: zenodrop
