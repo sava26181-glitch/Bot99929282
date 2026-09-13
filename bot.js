@@ -52,7 +52,7 @@ const stopFlags = {
 };
 
 /* ============================================================
- *  HTTP-СЕРВЕР ДЛЯ RENDER HEALTH CHECK
+ *  HTTP-СЕРВЕР
  * ============================================================ */
 
 const server = http.createServer((req, res) => {
@@ -71,14 +71,14 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`[health] listening on port ${PORT}`);
+  console.log('[health] listening on port ' + PORT);
 });
 
 if (process.env.RENDER) {
   setInterval(() => {
     const hostname = process.env.RENDER_EXTERNAL_HOSTNAME;
     if (!hostname) return;
-    https.get(`https://${hostname}/health`, () => {}).on('error', () => {});
+    https.get('https://' + hostname + '/health', () => {}).on('error', () => {});
   }, 12 * 60 * 1000);
   console.log('[self-ping] enabled for Render');
 }
@@ -94,14 +94,15 @@ function cleanup(...files) {
 function run(cmd, args) {
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args);
-    let stderr = "", stdout = "";
-    p.stdout?.on("data", d => stdout += d.toString());
-    p.stderr?.on("data", d => stderr += d.toString());
+    let stderr = "";
+    let stdout = "";
+    p.stdout.on("data", d => stdout += d.toString());
+    p.stderr.on("data", d => stderr += d.toString());
     p.on("error", reject);
     p.on("close", code => {
       if (code === 0) return resolve({ stdout, stderr });
-      const text = (stderr || stdout || `exit ${code}`).slice(-9000);
-      reject(new Error(`FFmpeg exit ${code}\n${text}`));
+      const text = (stderr || stdout || 'exit ' + code).slice(-9000);
+      reject(new Error('FFmpeg exit ' + code + '\n' + text));
     });
   });
 }
@@ -114,12 +115,13 @@ async function probe(file) {
       "format=duration:stream=index,codec_type,width,height,r_frame_rate,sample_rate,channel_layout,channels",
       "-of", "json", file
     ]);
-    let out = "", err = "";
+    let out = "";
+    let err = "";
     p.stdout.on("data", d => out += d.toString());
     p.stderr.on("data", d => err += d.toString());
     p.on("error", reject);
     p.on("close", code => {
-      if (code !== 0) return reject(new Error(err || `ffprobe exit ${code}`));
+      if (code !== 0) return reject(new Error(err || 'ffprobe exit ' + code));
       try {
         const j = JSON.parse(out);
         const streams = j.streams || [];
@@ -140,11 +142,11 @@ async function probe(file) {
 
 async function download(fileId, dest) {
   const f = await bot.getFile(fileId);
-  const url = `https://api.telegram.org/file/bot${TOKEN}/${f.file_path}`;
+  const url = 'https://api.telegram.org/file/bot' + TOKEN + '/' + f.file_path;
   await new Promise((resolve, reject) => {
     const stream = fs.createWriteStream(dest);
     const req = https.get(url, res => {
-      if (res.statusCode !== 200) { stream.close(); cleanup(dest); return reject(new Error(`Telegram HTTP ${res.statusCode}`)); }
+      if (res.statusCode !== 200) { stream.close(); cleanup(dest); return reject(new Error('Telegram HTTP ' + res.statusCode)); }
       res.pipe(stream);
       stream.on("finish", () => stream.close(resolve));
     });
@@ -162,17 +164,19 @@ function isUrl(text) {
   try { const u = new URL(text.trim()); return u.protocol === "http:" || u.protocol === "https:"; } catch { return false; }
 }
 
-function runCommand(cmd, args, label = cmd) {
+function runCommand(cmd, args, label) {
+  label = label || cmd;
   return new Promise((resolve, reject) => {
     const p = spawn(cmd, args);
-    let stderr = "", stdout = "";
-    p.stdout?.on("data", d => stdout += d.toString());
-    p.stderr?.on("data", d => stderr += d.toString());
-    p.on("error", err => reject(new Error(`${label}: ${err.message}`)));
+    let stderr = "";
+    let stdout = "";
+    p.stdout.on("data", d => stdout += d.toString());
+    p.stderr.on("data", d => stderr += d.toString());
+    p.on("error", err => reject(new Error(label + ': ' + err.message)));
     p.on("close", code => {
       if (code === 0) return resolve({ stdout, stderr });
-      const text = (stderr || stdout || `exit ${code}`).slice(-7000);
-      reject(new Error(`${label} exit ${code}\n${text}`));
+      const text = (stderr || stdout || 'exit ' + code).slice(-7000);
+      reject(new Error(label + ' exit ' + code + '\n' + text));
     });
   });
 }
@@ -186,7 +190,7 @@ async function downloadTikTok(url, dest) {
   const size = fs.statSync(dest).size;
   if (size > MAX_MB * 1024 * 1024) {
     cleanup(dest);
-    throw new Error(`Слишком большое: ${(size / 1024 / 1024).toFixed(1)} МБ. Максимум ${MAX_MB} МБ.`);
+    throw new Error('Слишком большое: ' + (size / 1024 / 1024).toFixed(1) + ' МБ. Максимум ' + MAX_MB + ' МБ.');
   }
 }
 
@@ -204,20 +208,20 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
   const n = Math.max(1, Math.min(3, Number(count)));
 
   if (t <= 0.01) throw new Error("Секунда вставки должна быть > 0.");
-  if (t >= info.duration - 0.03) throw new Error(`Секунда должна быть < ${(info.duration - 0.03).toFixed(2)}`);
+  if (t >= info.duration - 0.03) throw new Error('Секунда должна быть < ' + (info.duration - 0.03).toFixed(2));
 
   const filterParts = [];
-  filterParts.push(`[0:v]trim=start=0:end=${t},setpts=PTS-STARTPTS[pre]`);
+  filterParts.push('[0:v]trim=start=0:end=' + t + ',setpts=PTS-STARTPTS[pre]');
   filterParts.push(
-    `[0:v]trim=start=${t}:end=${Math.min(t + 0.04, info.duration)},setpts=PTS-STARTPTS,` +
-    `tpad=stop_mode=clone:stop_duration=${dur},trim=duration=${dur},setpts=PTS-STARTPTS[freeze]`
+    '[0:v]trim=start=' + t + ':end=' + Math.min(t + 0.04, info.duration) + ',setpts=PTS-STARTPTS,' +
+    'tpad=stop_mode=clone:stop_duration=' + dur + ',trim=duration=' + dur + ',setpts=PTS-STARTPTS[freeze]'
   );
 
   const scale = n === 1 ? 0.62 : n === 2 ? 0.47 : 0.36;
   for (let i = 0; i < n; i++) {
     filterParts.push(
-      `[${i + 1}:v]scale=w=iw*${scale}:h=-2:force_original_aspect_ratio=decrease,` +
-      `format=rgba,setpts=PTS-STARTPTS[b${i}]`
+      '[' + (i + 1) + ':v]scale=w=iw*' + scale + ':h=-2:force_original_aspect_ratio=decrease,' +
+      'format=rgba,setpts=PTS-STARTPTS[b' + i + ']'
     );
   }
 
@@ -229,14 +233,14 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
 
   let current = "freeze";
   for (let i = 0; i < n; i++) {
-    const next = `ov${i}`;
-    filterParts.push(`[${current}][b${i}]overlay=x=(W-w)/2:y=${ys[i]}:shortest=1[${next}]`);
+    const next = 'ov' + i;
+    filterParts.push('[' + current + '][b' + i + ']overlay=x=(W-w)/2:y=' + ys[i] + ':shortest=1[' + next + ']');
     current = next;
   }
 
   filterParts.push(
-    `[0:v]trim=start=${t},setpts=PTS-STARTPTS[post]`,
-    `[pre][${current}][post]concat=n=3:v=1:a=0[vout]`
+    '[0:v]trim=start=' + t + ',setpts=PTS-STARTPTS[post]',
+    '[pre][' + current + '][post]concat=n=3:v=1:a=0[vout]'
   );
 
   const args = ["-y", "-i", input];
@@ -246,18 +250,18 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
     const sr = Number.isFinite(info.sampleRate) ? info.sampleRate : 48000;
     const layout = info.channelLayout || "stereo";
     filterParts.push(
-      `[0:a]atrim=start=0:end=${t},asetpts=PTS-STARTPTS[apre]`,
-      `[0:a]atrim=start=${t},asetpts=PTS-STARTPTS[apost]`
+      '[0:a]atrim=start=0:end=' + t + ',asetpts=PTS-STARTPTS[apre]',
+      '[0:a]atrim=start=' + t + ',asetpts=PTS-STARTPTS[apost]'
     );
     if (bannerInfo.hasAudio) {
       filterParts.push(
-        `[1:a]atrim=start=0:duration=${dur},asetpts=PTS-STARTPTS,` +
-        `aformat=sample_rates=${sr}:channel_layouts=${layout}[abanner]`
+        '[1:a]atrim=start=0:duration=' + dur + ',asetpts=PTS-STARTPTS,' +
+        'aformat=sample_rates=' + sr + ':channel_layouts=' + layout + '[abanner]'
       );
     } else {
-      filterParts.push(`anullsrc=r=${sr}:cl=${layout},atrim=duration=${dur},asetpts=PTS-STARTPTS[abanner]`);
+      filterParts.push('anullsrc=r=' + sr + ':cl=' + layout + ',atrim=duration=' + dur + ',asetpts=PTS-STARTPTS[abanner]');
     }
-    filterParts.push(`[apre][abanner][apost]concat=n=3:v=0:a=1[aout]`);
+    filterParts.push('[apre][abanner][apost]concat=n=3:v=0:a=1[aout]');
     args.push(
       "-filter_complex", filterParts.join(";"),
       "-map", "[vout]", "-map", "[aout]",
@@ -278,7 +282,7 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
 }
 
 /* ============================================================
- *  ЛОГИН АККАУНТА (если нет cookies)
+ *  ЛОГИН
  * ============================================================ */
 
 async function ensureLoggedIn(chatId, acc) {
@@ -286,23 +290,23 @@ async function ensureLoggedIn(chatId, acc) {
     return true;
   }
   
-  await bot.sendMessage(chatId, `Логинюсь в ${acc.name}...`);
+  await bot.sendMessage(chatId, 'Логинюсь в ' + acc.name + '...');
   const result = await acc.uploader.login(acc.login, acc.password);
   
   console.log('[LOGIN RAW]:', JSON.stringify(result).slice(0, 500));
   
-  if (result?.data?.session_key) {
-    acc.cookies = `sessionid=${result.data.session_key}`;
+  if (result && result.data && result.data.session_key) {
+    acc.cookies = 'sessionid=' + result.data.session_key;
     await store.saveCookies(acc.id, acc.cookies);
-    await bot.sendMessage(chatId, `Залогинен в ${acc.name}.`);
+    await bot.sendMessage(chatId, 'Залогинен в ' + acc.name + '.');
     return true;
   }
   
-  if (result?.message === 'captcha' || result?.data?.captcha) {
-    throw new Error('Капча при логине — нужен решатель');
+  if (result && (result.message === 'captcha' || (result.data && result.data.captcha))) {
+    throw new Error('Капча при логине');
   }
   
-  throw new Error(`Логин не удался: ${JSON.stringify(result).slice(0, 200)}`);
+  throw new Error('Логин не удался: ' + JSON.stringify(result).slice(0, 200));
 }
 
 /* ============================================================
@@ -312,9 +316,9 @@ async function ensureLoggedIn(chatId, acc) {
 function settingsKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "⏱ Секунда", callback_data: "time" }, { text: "⏳ Длительность", callback_data: "duration" }],
-      [{ text: "🖼 1", callback_data: "count1" }, { text: "🖼 2", callback_data: "count2" }, { text: "🖼 3", callback_data: "count3" }],
-      [{ text: "🚀 ОБРАБОТАТЬ БАННЕР", callback_data: "render" }]
+      [{ text: "Секунда", callback_data: "time" }, { text: "Длительность", callback_data: "duration" }],
+      [{ text: "1", callback_data: "count1" }, { text: "2", callback_data: "count2" }, { text: "3", callback_data: "count3" }],
+      [{ text: "ОБРАБОТАТЬ БАННЕР", callback_data: "render" }]
     ]
   };
 }
@@ -322,17 +326,17 @@ function settingsKeyboard() {
 function mainMenuKeyboard() {
   return {
     inline_keyboard: [
-      [{ text: "➕ Добавить аккаунт вручную", callback_data: "add_account" }],
-      [{ text: "🏭 Массовое создание", callback_data: "factory" }],
-      [{ text: "📋 Список аккаунтов", callback_data: "list_accounts" }],
-      [{ text: "🔥 Прогреть все", callback_data: "warm_all" }],
-      [{ text: "🖼 Аватарка на все", callback_data: "set_avatar_all" }],
-      [{ text: "📝 Био на все", callback_data: "set_bio_all" }],
-      [{ text: "🌐 Прокси", callback_data: "proxies" }],
-      [{ text: "🏷 Сменить ник", callback_data: "change_nick" }],
-      [{ text: "⛔ Остановить всё", callback_data: "stop_all" }],
-      [{ text: "🗑 Удалить все аккаунты", callback_data: "delete_all_accounts" }],
-      [{ text: "📊 Статус", callback_data: "status" }]
+      [{ text: "Добавить аккаунт вручную", callback_data: "add_account" }],
+      [{ text: "Массовое создание", callback_data: "factory" }],
+      [{ text: "Список аккаунтов", callback_data: "list_accounts" }],
+      [{ text: "Прогреть все", callback_data: "warm_all" }],
+      [{ text: "Аватарка на все", callback_data: "set_avatar_all" }],
+      [{ text: "Био на все", callback_data: "set_bio_all" }],
+      [{ text: "Прокси", callback_data: "proxies" }],
+      [{ text: "Сменить ник", callback_data: "change_nick" }],
+      [{ text: "Остановить всё", callback_data: "stop_all" }],
+      [{ text: "Удалить все аккаунты", callback_data: "delete_all_accounts" }],
+      [{ text: "Статус", callback_data: "status" }]
     ]
   };
 }
@@ -341,8 +345,8 @@ function accountsKeyboard(prefix) {
   const rows = [];
   for (const [id, acc] of accounts) {
     rows.push([
-      { text: `${prefix} ${acc.name} (${acc.status})`, callback_data: `${prefix === "📤" ? "post_" : "warm_"}${id}` },
-      { text: "🏷", callback_data: `preview_tags_${id}` }
+      { text: prefix + ' ' + acc.name + ' (' + acc.status + ')', callback_data: (prefix === "post" ? "post_" : "warm_") + id },
+      { text: "tags", callback_data: 'preview_tags_' + id }
     ]);
   }
   return { inline_keyboard: rows };
@@ -350,11 +354,8 @@ function accountsKeyboard(prefix) {
 
 function showSettings(chatId) {
   const s = sessions.get(chatId);
-  return bot.sendMessage(
-    chatId,
-    `⚙️ Настройки баннера\n\n⏱ Вставка: ${s.insertAt} сек.\n⏳ Баннер: ${s.duration} сек.\n🖼 Баннеров: ${s.count}`,
-    { reply_markup: settingsKeyboard() }
-  );
+  const text = 'Настройки баннера\n\nВставка: ' + s.insertAt + ' сек.\nБаннер: ' + s.duration + ' сек.\nБаннеров: ' + s.count;
+  return bot.sendMessage(chatId, text, { reply_markup: settingsKeyboard() });
 }
 
 /* ============================================================
@@ -369,7 +370,7 @@ function showSettings(chatId) {
     const list = await store.loadAllAccounts();
     for (const a of list) {
       a.uploader = new TikTokMobile({
-        deviceId: a.fingerprint?.deviceId || null,
+        deviceId: a.fingerprint ? a.fingerprint.deviceId : null,
         proxy: a.proxy,
         fingerprint: a.fingerprint,
         cookies: a.cookies,
@@ -378,7 +379,7 @@ function showSettings(chatId) {
       });
       accounts.set(a.id, a);
     }
-    console.log(`[init] loaded ${accounts.size} accounts`);
+    console.log('[init] loaded ' + accounts.size + ' accounts');
   } catch (e) {
     console.error('[init] load accounts error:', e.message);
   }
@@ -392,16 +393,15 @@ function showSettings(chatId) {
  * ============================================================ */
 
 bot.onText(/^\/start$/, msg => {
-  bot.sendMessage(msg.chat.id,
-    "🤖 Zenodrop TikTok Farm\n\n" +
-    "• /menu — меню\n" +
-    "• Отправь видео или ссылку TikTok — обработка\n" +
-    "• Отправь login:password:name:tag1,tag2 — добавить аккаунт вручную",
-    { reply_markup: mainMenuKeyboard() });
+  const text = 'Zenodrop TikTok Farm\n\n' +
+    '/menu - меню\n' +
+    'Отправь видео или ссылку TikTok - обработка\n' +
+    'Отправь login:password:name:tag1,tag2 - добавить аккаунт вручную';
+  bot.sendMessage(msg.chat.id, text, { reply_markup: mainMenuKeyboard() });
 });
 
 bot.onText(/^\/menu$/, msg => {
-  bot.sendMessage(msg.chat.id, "📋 Меню:", { reply_markup: mainMenuKeyboard() });
+  bot.sendMessage(msg.chat.id, 'Меню:', { reply_markup: mainMenuKeyboard() });
 });
 
 /* ============================================================
@@ -411,11 +411,11 @@ bot.onText(/^\/menu$/, msg => {
 bot.on("video", async msg => {
   const chatId = msg.chat.id;
   const size = Number(msg.video.file_size || 0);
-  if (size && size > MAX_MB * 1024 * 1024) return bot.sendMessage(chatId, `Максимум ${MAX_MB} МБ.`);
+  if (size && size > MAX_MB * 1024 * 1024) return bot.sendMessage(chatId, 'Максимум ' + MAX_MB + ' МБ.');
 
-  const input = path.join(TMP, `${crypto.randomUUID()}_input.mp4`);
+  const input = path.join(TMP, crypto.randomUUID() + '_input.mp4');
   try {
-    await bot.sendMessage(chatId, "⬇️ Получаю видео...");
+    await bot.sendMessage(chatId, "Получаю видео...");
     await download(msg.video.file_id, input);
     const info = await probe(input);
 
@@ -441,7 +441,7 @@ bot.on("video", async msg => {
 });
 
 /* ============================================================
- *  ФОТО — АВАТАРКА
+ *  ФОТО
  * ============================================================ */
 
 bot.on("photo", async msg => {
@@ -452,25 +452,25 @@ bot.on("photo", async msg => {
   const fileId = photos[photos.length - 1].file_id;
 
   try {
-    await bot.sendMessage(chatId, "⬇️ Получаю изображение...");
+    await bot.sendMessage(chatId, "Получаю изображение...");
     const f = await bot.getFile(fileId);
-    const url = `https://api.telegram.org/file/bot${TOKEN}/${f.file_path}`;
+    const url = 'https://api.telegram.org/file/bot' + TOKEN + '/' + f.file_path;
 
     await new Promise((resolve, reject) => {
       const stream = fs.createWriteStream(AVATAR_PATH);
       https.get(url, res => {
-        if (res.statusCode !== 200) { stream.close(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+        if (res.statusCode !== 200) { stream.close(); return reject(new Error('HTTP ' + res.statusCode)); }
         res.pipe(stream);
         stream.on("finish", () => stream.close(resolve));
       }).on("error", reject);
     });
 
     avatarWaiting.delete(chatId);
-    await bot.sendMessage(chatId, `Сохранено. Ставлю на ${accounts.size} аккаунтов...`);
+    await bot.sendMessage(chatId, 'Сохранено. Ставлю на ' + accounts.size + ' аккаунтов...');
     await applyAvatarAll(chatId, AVATAR_PATH);
   } catch (e) {
     avatarWaiting.delete(chatId);
-    await bot.sendMessage(chatId, `${e.message}`);
+    await bot.sendMessage(chatId, e.message);
   }
 });
 
@@ -483,25 +483,25 @@ bot.on("document", async msg => {
   }
 
   try {
-    await bot.sendMessage(chatId, "⬇️ Получаю файл...");
+    await bot.sendMessage(chatId, "Получаю файл...");
     const f = await bot.getFile(doc.file_id);
-    const url = `https://api.telegram.org/file/bot${TOKEN}/${f.file_path}`;
+    const url = 'https://api.telegram.org/file/bot' + TOKEN + '/' + f.file_path;
 
     await new Promise((resolve, reject) => {
       const stream = fs.createWriteStream(AVATAR_PATH);
       https.get(url, res => {
-        if (res.statusCode !== 200) { stream.close(); return reject(new Error(`HTTP ${res.statusCode}`)); }
+        if (res.statusCode !== 200) { stream.close(); return reject(new Error('HTTP ' + res.statusCode)); }
         res.pipe(stream);
         stream.on("finish", () => stream.close(resolve));
       }).on("error", reject);
     });
 
     avatarWaiting.delete(chatId);
-    await bot.sendMessage(chatId, `Сохранено. Ставлю на ${accounts.size} аккаунтов...`);
+    await bot.sendMessage(chatId, 'Сохранено. Ставлю на ' + accounts.size + ' аккаунтов...');
     await applyAvatarAll(chatId, AVATAR_PATH);
   } catch (e) {
     avatarWaiting.delete(chatId);
-    await bot.sendMessage(chatId, `${e.message}`);
+    await bot.sendMessage(chatId, e.message);
   }
 });
 
@@ -517,7 +517,7 @@ bot.on("message", async msg => {
   if (bioWaiting.get(chatId)) {
     bioWaiting.delete(chatId);
     const bio = text === '-' ? DEFAULT_BIO : text;
-    await bot.sendMessage(chatId, `Ставлю био на ${accounts.size} аккаунтов...`);
+    await bot.sendMessage(chatId, 'Ставлю био на ' + accounts.size + ' аккаунтов...');
     await applyBioAll(chatId, bio);
     return;
   }
@@ -539,11 +539,11 @@ bot.on("message", async msg => {
   }
 
   if (isTikTokUrl(text)) {
-    const input = path.join(TMP, `${crypto.randomUUID()}_tiktok.mp4`);
+    const input = path.join(TMP, crypto.randomUUID() + '_tiktok.mp4');
     try {
       const old = sessions.get(chatId);
       if (old) cleanup(old.input, old.rendered);
-      await bot.sendMessage(chatId, "⬇️ Скачиваю TikTok...");
+      await bot.sendMessage(chatId, "Скачиваю TikTok...");
       await downloadTikTok(text, input);
       const info = await probe(input);
       sessions.set(chatId, {
@@ -555,7 +555,7 @@ bot.on("message", async msg => {
       await showSettings(chatId);
     } catch (e) {
       cleanup(input);
-      await bot.sendMessage(chatId, `${String(e.message).slice(0, 800)}`);
+      await bot.sendMessage(chatId, String(e.message).slice(0, 800));
     }
     return;
   }
@@ -564,7 +564,10 @@ bot.on("message", async msg => {
 
   const accMatch = text.match(/^([^:]+):([^:]+):([^:]+)(?::(.+))?$/);
   if (accMatch && !sessions.get(chatId)) {
-    const [, login, password, name, nicheStr] = accMatch;
+    const login = accMatch[1];
+    const password = accMatch[2];
+    const name = accMatch[3];
+    const nicheStr = accMatch[4];
     const id = crypto.randomUUID().slice(0, 12);
     const fingerprint = generateFingerprint(id);
     const proxy = await proxyMgr.acquireProxyForAccount(id, null);
@@ -575,13 +578,13 @@ bot.on("message", async msg => {
       profileUrl: null
     };
     acc.uploader = new TikTokMobile({
-      deviceId: fingerprint?.deviceId || null,
+      deviceId: fingerprint ? fingerprint.deviceId : null,
       proxy, fingerprint, accountId: id,
       onCookies: async (cks) => { await store.saveCookies(id, cks); }
     });
     accounts.set(id, acc);
     await store.saveAccount(acc);
-    return bot.sendMessage(chatId, `Аккаунт "${acc.name}" добавлен.\nID: ${id}`);
+    return bot.sendMessage(chatId, 'Аккаунт "' + acc.name + '" добавлен.\nID: ' + id);
   }
 
   const s = sessions.get(chatId);
@@ -590,7 +593,7 @@ bot.on("message", async msg => {
   if (s.waiting === "time") {
     const v = Number(text.replace(",", "."));
     if (!Number.isFinite(v) || v < 0 || v >= s.videoDuration - 0.03)
-      return bot.sendMessage(chatId, `0..${(s.videoDuration - 0.03).toFixed(2)}`);
+      return bot.sendMessage(chatId, '0..' + (s.videoDuration - 0.03).toFixed(2));
     s.insertAt = v; s.waiting = null;
     return showSettings(chatId);
   }
@@ -603,7 +606,7 @@ bot.on("message", async msg => {
 });
 
 /* ============================================================
- *  ПРОКСИ — ИМПОРТ
+ *  ПРОКСИ
  * ============================================================ */
 
 bot.on("message", async msg => {
@@ -620,9 +623,9 @@ bot.on("message", async msg => {
       /^[^\s@]+:[^\s@]+@[^\s:]+:\d+$/.test(l)
     );
     if (looksLikeProxy) {
-      await bot.sendMessage(chatId, `Импортирую ${lines.length} строк...`);
+      await bot.sendMessage(chatId, 'Импортирую ' + lines.length + ' строк...');
       const r = await proxyMgr.importProxies(text, 'telegram');
-      return bot.sendMessage(chatId, `Добавлено: ${r.added}\nПропущено: ${r.skipped}`);
+      return bot.sendMessage(chatId, 'Добавлено: ' + r.added + '\nПропущено: ' + r.skipped);
     }
   }
 });
@@ -646,16 +649,15 @@ bot.on("callback_query", async q => {
 
   if (data === "delete_all_accounts") {
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId,
-      `Удалить все аккаунты?\n\nБудет удалено: ${accounts.size}\nБаза данных очищена.`,
-      {
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: "🗑 ДА, УДАЛИТЬ ВСЁ", callback_data: "delete_all_confirm" }],
-            [{ text: "❌ Отмена", callback_data: "delete_all_cancel" }]
-          ]
-        }
-      });
+    const text = 'Удалить все аккаунты?\n\nБудет удалено: ' + accounts.size + '\nБаза данных очищена.';
+    return bot.sendMessage(chatId, text, {
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: "ДА, УДАЛИТЬ ВСЁ", callback_data: "delete_all_confirm" }],
+          [{ text: "Отмена", callback_data: "delete_all_cancel" }]
+        ]
+      }
+    });
   }
 
   if (data === "delete_all_confirm") {
@@ -663,15 +665,15 @@ bot.on("callback_query", async q => {
     try {
       const count = accounts.size;
       for (const [id, acc] of accounts) {
-        if (acc.proxy?.id) {
+        if (acc.proxy && acc.proxy.id) {
           await store.releaseProxyAtomic(acc.proxy.id).catch(() => {});
         }
       }
       accounts.clear();
       await store.deleteAllAccounts();
-      return bot.sendMessage(chatId, `Удалено аккаунтов: ${count}.`);
+      return bot.sendMessage(chatId, 'Удалено аккаунтов: ' + count + '.');
     } catch (e) {
-      return bot.sendMessage(chatId, `Ошибка удаления: ${e.message}`);
+      return bot.sendMessage(chatId, 'Ошибка удаления: ' + e.message);
     }
   }
 
@@ -688,18 +690,19 @@ bot.on("callback_query", async q => {
   if (data === "list_accounts") {
     await bot.answerCallbackQuery(q.id);
     if (accounts.size === 0) return bot.sendMessage(chatId, "Пусто.");
-    let txt = `Аккаунты (${accounts.size}):\n\n`;
+    let txt = 'Аккаунты (' + accounts.size + '):\n\n';
     let i = 1;
     for (const [id, acc] of accounts) {
-      txt += `${i++}. ${acc.name} (${id})\n`;
-      txt += `   ${acc.login} | ${acc.status}\n`;
+      txt += i + '. ' + acc.name + ' (' + id + ')\n';
+      txt += '   ' + acc.login + ' | ' + acc.status + '\n';
       if (acc.profileUrl) {
-        txt += `   ${acc.profileUrl}\n`;
+        txt += '   ' + acc.profileUrl + '\n';
       } else {
-        txt += `   нет ссылки\n`;
+        txt += '   нет ссылки\n';
       }
-      txt += `\n`;
-      if (i > 30) { txt += `... и ещё ${accounts.size - 30}\n`; break; }
+      txt += '\n';
+      i++;
+      if (i > 30) { txt += '... и ещё ' + (accounts.size - 30) + '\n'; break; }
     }
     return bot.sendMessage(chatId, txt);
   }
@@ -707,12 +710,12 @@ bot.on("callback_query", async q => {
   if (data === "status") {
     await bot.answerCallbackQuery(q.id);
     const stats = await store.proxyStats();
-    let txt = `Статус\n\nАккаунтов: ${accounts.size}\nСессий: ${sessions.size}\n\n`;
-    txt += `Прокси: всего ${stats.total}\nfree: ${stats.free}\nbusy: ${stats.busy}\ndead: ${stats.dead}\n\n`;
-    txt += `Остановка: фабрика=${stopFlags.factory} прогрев=${stopFlags.warm} постинг=${stopFlags.post}\n\n`;
+    let txt = 'Статус\n\nАккаунтов: ' + accounts.size + '\nСессий: ' + sessions.size + '\n\n';
+    txt += 'Прокси: всего ' + stats.total + '\nfree: ' + stats.free + '\nbusy: ' + stats.busy + '\ndead: ' + stats.dead + '\n\n';
+    txt += 'Остановка: фабрика=' + stopFlags.factory + ' прогрев=' + stopFlags.warm + ' постинг=' + stopFlags.post + '\n\n';
     const accStats = {};
     for (const acc of accounts.values()) accStats[acc.status] = (accStats[acc.status] || 0) + 1;
-    for (const [st, cnt] of Object.entries(accStats)) txt += `${st}: ${cnt}\n`;
+    for (const st of Object.keys(accStats)) txt += st + ': ' + accStats[st] + '\n';
     return bot.sendMessage(chatId, txt);
   }
 
@@ -727,7 +730,7 @@ bot.on("callback_query", async q => {
     await bot.answerCallbackQuery(q.id);
     if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
     bioWaiting.set(chatId, true);
-    return bot.sendMessage(chatId, `Отправь текст био. Дефолт:\n\n${DEFAULT_BIO}\n\nИли - для дефолта.`);
+    return bot.sendMessage(chatId, 'Отправь текст био. Дефолт:\n\n' + DEFAULT_BIO + '\n\nИли - для дефолта.');
   }
 
   if (data === "factory") {
@@ -743,11 +746,11 @@ bot.on("callback_query", async q => {
     const free = list.filter(p => p.status === 'free').length;
     const busy = list.filter(p => p.status === 'busy').length;
     return bot.sendMessage(chatId,
-      `Прокси\n\nВсего: ${list.length}\nfree: ${free}\nbusy: ${busy}\n\nОтправь список прокси одним сообщением.`,
+      'Прокси\n\nВсего: ' + list.length + '\nfree: ' + free + '\nbusy: ' + busy + '\n\nОтправь список прокси одним сообщением.',
       {
         reply_markup: {
           inline_keyboard: [
-            [{ text: "📥 Проверить все", callback_data: "proxy_check" }]
+            [{ text: "Проверить все", callback_data: "proxy_check" }]
           ]
         }
       });
@@ -756,14 +759,15 @@ bot.on("callback_query", async q => {
   if (data === "proxy_check") {
     await bot.answerCallbackQuery(q.id);
     const list = await store.loadAllProxies();
-    await bot.sendMessage(chatId, `Проверяю ${list.length} прокси...`);
-    let ok = 0, fail = 0;
+    await bot.sendMessage(chatId, 'Проверяю ' + list.length + ' прокси...');
+    let ok = 0;
+    let fail = 0;
     for (const p of list) {
       const r = await proxyMgr.checkProxy(p);
       if (r.ok) ok++;
-      else { fail++; await store.saveProxy({ ...p, status: 'dead' }); }
+      else { fail++; await store.saveProxy(Object.assign({}, p, { status: 'dead' })); }
     }
-    return bot.sendMessage(chatId, `Живых: ${ok}\nМёртвых: ${fail}`);
+    return bot.sendMessage(chatId, 'Живых: ' + ok + '\nМёртвых: ' + fail);
   }
 
   if (data === "change_nick") {
@@ -771,7 +775,7 @@ bot.on("callback_query", async q => {
     if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
     const rows = [];
     for (const [id, acc] of accounts) {
-      rows.push([{ text: `🏷 ${acc.name}`, callback_data: `nick_${id}` }]);
+      rows.push([{ text: acc.name, callback_data: 'nick_' + id }]);
     }
     return bot.sendMessage(chatId, "Выбери аккаунт:", { reply_markup: { inline_keyboard: rows } });
   }
@@ -782,7 +786,7 @@ bot.on("callback_query", async q => {
     accounts.forEach(a => a.__waitNick = false);
     const acc = accounts.get(id);
     if (acc) acc.__waitNick = true;
-    return bot.sendMessage(chatId, `Введи новый ник для ${acc?.name}:`);
+    return bot.sendMessage(chatId, 'Введи новый ник для ' + (acc ? acc.name : '') + ':');
   }
 
   if (data === "warm_all") {
@@ -803,7 +807,7 @@ bot.on("callback_query", async q => {
     const acc = accounts.get(id);
     if (!acc) return bot.sendMessage(chatId, "Нет.");
     const tags = buildHashtags({ niche: acc.niche || undefined });
-    return bot.sendMessage(chatId, `Хештеги ${acc.name}:\n\n${tags.join(' ')}`);
+    return bot.sendMessage(chatId, 'Хештеги ' + acc.name + ':\n\n' + tags.join(' '));
   }
 
   if (!s) return bot.answerCallbackQuery(q.id, { text: "Сначала видео." });
@@ -820,23 +824,23 @@ bot.on("callback_query", async q => {
   }
   if (/^count[123]$/.test(data)) {
     s.count = Number(data.slice(-1));
-    await bot.answerCallbackQuery(q.id, { text: `Баннеров: ${s.count}` });
+    await bot.answerCallbackQuery(q.id, { text: 'Баннеров: ' + s.count });
     return showSettings(chatId);
   }
 
   if (data === "render") {
     await bot.answerCallbackQuery(q.id);
-    const output = path.join(TMP, `${crypto.randomUUID()}_rendered.mp4`);
+    const output = path.join(TMP, crypto.randomUUID() + '_rendered.mp4');
     try {
       await bot.sendMessage(chatId, "Вставляю баннер...");
       await renderVideo(s.input, output, s.insertAt, s.duration, s.count);
       s.rendered = output;
       await bot.sendVideo(chatId, output, { caption: "Готово", supports_streaming: true });
       if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
-      await bot.sendMessage(chatId, "Куда заливаем?", { reply_markup: accountsKeyboard("📤") });
+      await bot.sendMessage(chatId, "Куда заливаем?", { reply_markup: accountsKeyboard("post") });
     } catch (e) {
       console.error(e);
-      await bot.sendMessage(chatId, `${String(e.message).slice(0, 1000)}`);
+      await bot.sendMessage(chatId, String(e.message).slice(0, 1000));
     }
     return;
   }
@@ -844,7 +848,7 @@ bot.on("callback_query", async q => {
   if (data.startsWith("post_")) {
     const id = data.slice(5);
     await bot.answerCallbackQuery(q.id);
-    if (!s?.rendered) return bot.sendMessage(chatId, "Сначала баннер.");
+    if (!s || !s.rendered) return bot.sendMessage(chatId, "Сначала баннер.");
     stopFlags.post = false;
     return startPost(chatId, id, s);
   }
@@ -861,19 +865,19 @@ bot.on("message", async msg => {
   for (const [id, acc] of accounts) {
     if (acc.__waitNick) {
       acc.__waitNick = false;
-      await bot.sendMessage(chatId, `Меняю ник на "${text}"...`);
+      await bot.sendMessage(chatId, 'Меняю ник на "' + text + '"...');
       try {
         await ensureLoggedIn(chatId, acc);
         const r = await acc.uploader.setNickname(text);
         if (r && !r.error) {
           acc.name = text;
           await store.saveAccount(acc);
-          await bot.sendMessage(chatId, `Ник изменён.`);
+          await bot.sendMessage(chatId, "Ник изменён.");
         } else {
-          await bot.sendMessage(chatId, `${r?.error || 'failed'}`);
+          await bot.sendMessage(chatId, (r && r.error) || 'failed');
         }
       } catch (e) {
-        await bot.sendMessage(chatId, `${e.message}`);
+        await bot.sendMessage(chatId, e.message);
       }
       return;
     }
@@ -885,40 +889,46 @@ bot.on("message", async msg => {
  * ============================================================ */
 
 async function startFactory(chatId, job) {
-  const { count, niche } = job;
+  const count = job.count;
+  const niche = job.niche;
   factoryJobs.delete(chatId);
   stopFlags.factory = false;
 
   const stats = await store.proxyStats();
-  await bot.sendMessage(chatId,
-    `Фабрика запущена\n\n` +
-`Аккаунтов: ${count}\nНиша: ${niche ? niche.join(', ') : 'общая'}\n` +
-    `Прокси: ${stats.freedone} free / ${stats.total} всего\n` +
-}`);
-    `Параллель}
+  const text = 'Фабрика запущена\n\n' +
+    'Аккаунтов: ' + count + '\n' +
+    'Ниша: ' + (niche ? niche.join(', ') : 'общая') + '\n' +
+    'Прокси: ' + stats.free + ' free / ' + stats.total + ' всего\n' +
+    'Параллельность: 10\n\n' +
+    'Для остановки: /menu -> Остановить всё';
 
-ность: 10\n\n/*` +
-    `Для остановки: /menu -> = Остановить всё`);
+  await bot.sendMessage(chatId, text);
 
   let lastUpdate = 0;
   try {
     const r = await factory.createBatch({
-      count, concurrency: 10, niche, startSeq: 1,
+      count: count,
+      concurrency: 10,
+      niche: niche,
+      startSeq: 1,
       log: (m) => console.log(m),
       shouldStop: () => stopFlags.factory,
-      onProgress: async ({ done, total, ok, fail, inFlight, elapsed }) => {
+      onProgress: async (p) => {
         if (Date.now() - lastUpdate < 30000) return;
         lastUpdate = Date.now();
-        const pct = Math.floor(done / total * 100);
-        const bar = '█'.repeat(Math.floor(pct / 5)) + '░'.repeat(20 - Math.floor(pct / 5));
-        await bot.sendMessage(chatId,
-          `Прогресс\n\n${bar} ${pct}%\n\nOK: ${ok}\nFail: ${fail}\nВ работе: ${inFlight}\nВремя: ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`).catch(() => {});
+        const pct = Math.floor(p.done / p.total * 100);
+        const bar = '='.repeat(Math.floor(pct / 5)) + '-'.repeat(20 - Math.floor(pct / 5));
+        const progressText = 'Прогресс\n\n' + bar + ' ' + pct + '%\n\n' +
+          'OK: ' + p.ok + '\nFail: ' + p.fail + '\n' +
+          'В работе: ' + p.inFlight + '\n' +
+          'Время: ' + Math.floor(p.elapsed / 60) + ':' + String(p.elapsed % 60).padStart(2, '0');
+        await bot.sendMessage(chatId, progressText).catch(() => {});
       }
     });
 
     for (const acc of r.ok) {
       acc.uploader = new TikTokMobile({
-        deviceId: acc.fingerprint?.deviceId || null,
+        deviceId: acc.fingerprint ? acc.fingerprint.deviceId : null,
         proxy: acc.proxy, fingerprint: acc.fingerprint,
         cookies: acc.cookies, accountId: acc.id,
         onCookies: async (cks) => { await store.saveCookies(acc.id, cks); }
@@ -928,13 +938,24 @@ async function startFactory(chatId, job) {
 
     const min = Math.floor(r.elapsed / 60);
     const sec = r.elapsed % 60;
-    await bot.sendMessage(chatId,
-      `Фабрика завершена${r.stopped ? ' (ОСТАНОВЛЕНА)' : ''}\n\n` +
-      `Создано: ${r.ok.length}\nОшибок: ${r.fail.length}\nВремя: ${min}м ${sec}с\n\n` +
-      (r.fail.length ? `Причины:\n` + Object.entries(r.fail.reduce((a, f) => { a[f.reason] = (a[f.reason] || 0) + 1; return a; }, {})).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `• ${k}: ${v}`).join('\n') : ''));
+    let finalText = 'Фабрика завершена' + (r.stopped ? ' (ОСТАНОВЛЕНА)' : '') + '\n\n' +
+      'Создано: ' + r.ok.length + '\n' +
+      'Ошибок: ' + r.fail.length + '\n' +
+      'Время: ' + min + 'м ' + sec + 'с\n\n';
+
+    if (r.fail.length) {
+      const reasons = r.fail.reduce((a, f) => {
+        a[f.reason] = (a[f.reason] || 0) + 1;
+        return a;
+      }, {});
+      const top = Object.entries(reasons).sort((a, b) => b[1] - a[1]).slice(0, 5);
+      finalText += 'Причины:\n' + top.map(x => '- ' + x[0] + ': ' + x[1]).join('\n');
+    }
+
+    await bot.sendMessage(chatId, finalText);
   } catch (e) {
     console.error('factory error:', e);
-    await bot.sendMessage(chatId, `Фабрика упала: ${e.message}`);
+    await bot.sendMessage(chatId, 'Фабрика упала: ' + e.message);
   }
 }
 
@@ -947,42 +968,47 @@ async function startWarm(chatId, id) {
   if (!acc) return bot.sendMessage(chatId, "Нет аккаунта.");
   acc.status = "warming";
   await store.updateStatus(id, "warming");
-  await bot.sendMessage(chatId, `Прогрев ${acc.name}...`);
+  await bot.sendMessage(chatId, 'Прогрев ' + acc.name + '...');
   try {
     await ensureLoggedIn(chatId, acc);
     const warmer = new TikTokMobileWarmer(acc.uploader);
     await warmer.warmAccount(3, 20, () => stopFlags.warm);
     acc.status = "warmed";
     await store.updateStatus(id, "warmed");
-    await bot.sendMessage(chatId, `${acc.name} прогрет!`);
+    await bot.sendMessage(chatId, acc.name + ' прогрет!');
   } catch (e) {
     acc.status = "error";
     await store.updateStatus(id, "error");
-    await bot.sendMessage(chatId, `${acc.name}: ${e.message}`);
+    await bot.sendMessage(chatId, acc.name + ': ' + e.message);
   }
 }
 
 async function startWarmAll(chatId) {
   if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
-  await bot.sendMessage(chatId, `Прогреваю ${accounts.size} последовательно...`);
+  await bot.sendMessage(chatId, 'Прогреваю ' + accounts.size + ' последовательно...');
   let done = 0;
   for (const [id, acc] of accounts) {
     if (stopFlags.warm) {
-      await bot.sendMessage(chatId, `Остановлено на ${done}/${accounts.size}`);
+      await bot.sendMessage(chatId, 'Остановлено на ' + done + '/' + accounts.size);
       return;
     }
     if (acc.status === 'warming') continue;
     try { await startWarm(chatId, id); } catch {}
     done++;
-    if (done % 5 === 0) await bot.sendMessage(chatId, `${done}/${accounts.size}`).catch(() => {});
-    await new Promise(r => setTimeout(r, 30_000));
+    if (done % 5 === 0) await bot.sendMessage(chatId, done + '/' + accounts.size).catch(() => {});
+    await new Promise(r => setTimeout(r, 30000));
   }
-  await bot.sendMessage(chatId, `Прогрев завершён:===========================================================
- *  АВАТАРКА + БИО НА ВСЕ
+  await bot.sendMessage(chatId, 'Прогрев завершён: ' + done);
+}
+
+/* ============================================================
+ *  АВАТАРКА + БИО
  * ============================================================ */
 
 async function applyAvatarAll(chatId, imagePath) {
-  let done = 0, ok = 0, fail = 0;
+  let done = 0;
+  let ok = 0;
+  let fail = 0;
   for (const [id, acc] of accounts) {
     done++;
     try {
@@ -992,15 +1018,17 @@ async function applyAvatarAll(chatId, imagePath) {
       else fail++;
     } catch (e) { fail++; }
     if (done % 5 === 0 || done === accounts.size) {
-      await bot.sendMessage(chatId, `${done}/${accounts.size} (OK: ${ok} FAIL: ${fail})`).catch(() => {});
+      await bot.sendMessage(chatId, done + '/' + accounts.size + ' (OK: ' + ok + ' FAIL: ' + fail + ')').catch(() => {});
     }
     await new Promise(r => setTimeout(r, 15000));
   }
-  await bot.sendMessage(chatId, `Аватарка: ${ok} успешно, ${fail} ошибок.`);
+  await bot.sendMessage(chatId, 'Аватарка: ' + ok + ' успешно, ' + fail + ' ошибок.');
 }
 
 async function applyBioAll(chatId, bioText) {
-  let done = 0, ok = 0, fail = 0;
+  let done = 0;
+  let ok = 0;
+  let fail = 0;
   for (const [id, acc] of accounts) {
     done++;
     try {
@@ -1010,11 +1038,11 @@ async function applyBioAll(chatId, bioText) {
       else fail++;
     } catch (e) { fail++; }
     if (done % 5 === 0 || done === accounts.size) {
-      await bot.sendMessage(chatId, `${done}/${accounts.size} (OK: ${ok} FAIL: ${fail})`).catch(() => {});
+      await bot.sendMessage(chatId, done + '/' + accounts.size + ' (OK: ' + ok + ' FAIL: ' + fail + ')').catch(() => {});
     }
     await new Promise(r => setTimeout(r, 15000));
   }
-  await bot.sendMessage(chatId, `Био: ${ok} успешно, ${fail} ошибок.`);
+  await bot.sendMessage(chatId, 'Био: ' + ok + ' успешно, ' + fail + ' ошибок.');
 }
 
 /* ============================================================
@@ -1026,23 +1054,23 @@ async function startPost(chatId, id, session) {
   if (!acc) return bot.sendMessage(chatId, "Нет аккаунта.");
   acc.status = "posting";
   await store.updateStatus(id, "posting");
-  await bot.sendMessage(chatId, `Заливаю в ${acc.name}...`);
+  await bot.sendMessage(chatId, 'Заливаю в ' + acc.name + '...');
 
   try {
     await ensureLoggedIn(chatId, acc);
     const hashtags = buildHashtags({ niche: acc.niche || undefined });
-    await bot.sendMessage(chatId, `${hashtags.join(' ')}`);
+    await bot.sendMessage(chatId, hashtags.join(' '));
     const caption = session.caption || "Check this out";
-    const r = await acc.uploader.uploadVideo(session.rendered, caption, { hashtags });
+    const r = await acc.uploader.uploadVideo(session.rendered, caption, { hashtags: hashtags });
     acc.status = "posted";
     acc.postsCount = (acc.postsCount || 0) + 1;
     await store.updateStatus(id, "posted");
     await store.markPosted(id);
-    await bot.sendMessage(chatId, `${acc.name} -> ${r.url || 'OK'}`);
+    await bot.sendMessage(chatId, acc.name + ' -> ' + (r.url || 'OK'));
   } catch (e) {
     acc.status = "error";
     await store.updateStatus(id, "error");
-    await bot.sendMessage(chatId, `${acc.name}: ${String(e.message).slice(0, 500)}`);
+    await bot.sendMessage(chatId, acc.name + ': ' + String(e.message).slice(0, 500));
   } finally {
     if (session.input) cleanup(session.input);
     if (session.rendered) cleanup(session.rendered);
@@ -1054,5 +1082,5 @@ async function startPost(chatId, id, session) {
  *  СТАРТ
  * ============================================================ */
 
-bot.on("polling_error", err => console.error("POLLING:", err?.message || err));
+bot.on("polling_error", err => console.error("POLLING:", err && err.message || err));
 console.log("Zenodrop TikTok Farm started.");
