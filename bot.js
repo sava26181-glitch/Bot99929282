@@ -278,6 +278,34 @@ async function renderVideo(input, output, insertAt, bannerDuration, count) {
 }
 
 /* ============================================================
+ *  ЛОГИН АККАУНТА (если нет cookies)
+ * ============================================================ */
+
+async function ensureLoggedIn(chatId, acc) {
+  if (acc.cookies && acc.cookies.includes('sessionid=')) {
+    return true;
+  }
+  
+  await bot.sendMessage(chatId, `Логинюсь в ${acc.name}...`);
+  const result = await acc.uploader.login(acc.login, acc.password);
+  
+  console.log('[LOGIN RAW]:', JSON.stringify(result).slice(0, 500));
+  
+  if (result?.data?.session_key) {
+    acc.cookies = `sessionid=${result.data.session_key}`;
+    await store.saveCookies(acc.id, acc.cookies);
+    await bot.sendMessage(chatId, `Залогинен в ${acc.name}.`);
+    return true;
+  }
+  
+  if (result?.message === 'captcha' || result?.data?.captcha) {
+    throw new Error('Капча при логине — нужен решатель');
+  }
+  
+  throw new Error(`Логин не удался: ${JSON.stringify(result).slice(0, 200)}`);
+}
+
+/* ============================================================
  *  КЛАВИАТУРЫ
  * ============================================================ */
 
@@ -613,13 +641,13 @@ bot.on("callback_query", async q => {
     stopFlags.factory = true;
     stopFlags.warm = true;
     stopFlags.post = true;
-    return bot.sendMessage(chatId, "Сигнал остановки отправлен. Все процессы прекратятся после текущей операции.");
+    return bot.sendMessage(chatId, "Сигнал остановки отправлен.");
   }
 
   if (data === "delete_all_accounts") {
     await bot.answerCallbackQuery(q.id);
     return bot.sendMessage(chatId,
-      `Удалить все аккаунты?\n\nБудет удалено: ${accounts.size} аккаунтов\nБаза данных очищена\nПрокси освобождены\n\nЭто действие нельзя отменить.`,
+      `Удалить все аккаунты?\n\nБудет удалено: ${accounts.size}\nБаза данных очищена.`,
       {
         reply_markup: {
           inline_keyboard: [
@@ -641,7 +669,7 @@ bot.on("callback_query", async q => {
       }
       accounts.clear();
       await store.deleteAllAccounts();
-      return bot.sendMessage(chatId, `Удалено аккаунтов: ${count}. База очищена.`);
+      return bot.sendMessage(chatId, `Удалено аккаунтов: ${count}.`);
     } catch (e) {
       return bot.sendMessage(chatId, `Ошибка удаления: ${e.message}`);
     }
@@ -835,6 +863,7 @@ bot.on("message", async msg => {
       acc.__waitNick = false;
       await bot.sendMessage(chatId, `Меняю ник на "${text}"...`);
       try {
+        await ensureLoggedIn(chatId, acc);
         const r = await acc.uploader.setNickname(text);
         if (r && !r.error) {
           acc.name = text;
@@ -863,10 +892,13 @@ async function startFactory(chatId, job) {
   const stats = await store.proxyStats();
   await bot.sendMessage(chatId,
     `Фабрика запущена\n\n` +
-    `Аккаунтов: ${count}\nНиша: ${niche ? niche.join(', ') : 'общая'}\n` +
-    `Прокси: ${stats.free} free / ${stats.total} всего\n` +
-    `Параллельность: 10\n\n` +
-    `Для остановки: /menu -> Остановить всё`);
+    `Аккаунтов: ${count}\nНиша: ${niche ? niche.join(', ') : 'общая'}\n ${` +
+    `Прокси: ${stats.freedone} free / ${stats.total} всего\n` +
+}`);
+    `Параллель}
+
+ность: 10\n\n/*` +
+    `Для остановки: /menu -> = Остановить всё`);
 
   let lastUpdate = 0;
   try {
@@ -917,6 +949,7 @@ async function startWarm(chatId, id) {
   await store.updateStatus(id, "warming");
   await bot.sendMessage(chatId, `Прогрев ${acc.name}...`);
   try {
+    await ensureLoggedIn(chatId, acc);
     const warmer = new TikTokMobileWarmer(acc.uploader);
     await warmer.warmAccount(3, 20, () => stopFlags.warm);
     acc.status = "warmed";
@@ -944,10 +977,7 @@ async function startWarmAll(chatId) {
     if (done % 5 === 0) await bot.sendMessage(chatId, `${done}/${accounts.size}`).catch(() => {});
     await new Promise(r => setTimeout(r, 30_000));
   }
-  await bot.sendMessage(chatId, `Прогрев завершён: ${done}`);
-}
-
-/* ============================================================
+  await bot.sendMessage(chatId, `Прогрев завершён:===========================================================
  *  АВАТАРКА + БИО НА ВСЕ
  * ============================================================ */
 
@@ -956,6 +986,7 @@ async function applyAvatarAll(chatId, imagePath) {
   for (const [id, acc] of accounts) {
     done++;
     try {
+      await ensureLoggedIn(chatId, acc);
       const r = await acc.uploader.setAvatar(imagePath);
       if (r && !r.error) ok++;
       else fail++;
@@ -973,6 +1004,7 @@ async function applyBioAll(chatId, bioText) {
   for (const [id, acc] of accounts) {
     done++;
     try {
+      await ensureLoggedIn(chatId, acc);
       const r = await acc.uploader.setBio(bioText);
       if (r && !r.error) ok++;
       else fail++;
@@ -997,6 +1029,7 @@ async function startPost(chatId, id, session) {
   await bot.sendMessage(chatId, `Заливаю в ${acc.name}...`);
 
   try {
+    await ensureLoggedIn(chatId, acc);
     const hashtags = buildHashtags({ niche: acc.niche || undefined });
     await bot.sendMessage(chatId, `${hashtags.join(' ')}`);
     const caption = session.caption || "Check this out";
