@@ -191,6 +191,9 @@ class TikTokMobile {
       'Accept-Encoding': 'gzip',
       'Content-Type': 'application/x-www-form-urlencoded'
     };
+
+    console.log('[HEADERS]', JSON.stringify(sig).slice(0, 200));
+
     if (sig['x-gorgon']) headers['x-gorgon'] = sig['x-gorgon'];
     if (sig['x-khronos']) headers['x-khronos'] = sig['x-khronos'];
     if (sig['x-argus']) headers['x-argus'] = sig['x-argus'];
@@ -199,6 +202,7 @@ class TikTokMobile {
     if (sig['x-ss-stub']) headers['x-ss-stub'] = sig['x-ss-stub'];
     if (sig['x-bogus']) headers['x-bogus'] = sig['x-bogus'];
     if (this.cookies) headers['Cookie'] = this.cookies;
+
     return headers;
   }
 
@@ -226,7 +230,7 @@ class TikTokMobile {
 
     console.log('[DEVICE REGISTER] deviceId =', this.deviceId, '| iid =', this.iid);
 
-    if (!this.deviceId) {
+    if (!this.deviceId || this.deviceId === '0') {
       throw new Error('device_register failed: no device_id — проверь SignerPy и прокси');
     }
 
