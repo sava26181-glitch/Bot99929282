@@ -682,6 +682,46 @@ bot.on("callback_query", async q => {
     return bot.sendMessage(chatId, "Удаление отменено.");
   }
 
+  /* --- УДАЛЕНИЕ ПРОКСИ --- */
+  if (data === "delete_all_proxies") {
+    await bot.answerCallbackQuery(q.id);
+    return bot.sendMessage(chatId,
+      'Удалить ВСЕ прокси?\n\nЭто снесёт весь пул. Аккаунты потеряют привязку.',
+      {
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: "ДА, УДАЛИТЬ ВСЁ", callback_data: "delete_proxies_confirm" }],
+            [{ text: "Отмена", callback_data: "delete_proxies_cancel" }]
+          ]
+        }
+      });
+  }
+
+  if (data === "delete_proxies_confirm") {
+    await bot.answerCallbackQuery(q.id);
+    try {
+      const count = await store.deleteAllProxies();
+      return bot.sendMessage(chatId, 'Удалено прокси: ' + count + '.');
+    } catch (e) {
+      return bot.sendMessage(chatId, 'Ошибка удаления прокси: ' + e.message);
+    }
+  }
+
+  if (data === "delete_proxies_cancel") {
+    await bot.answerCallbackQuery(q.id);
+    return bot.sendMessage(chatId, "Удаление прокси отменено.");
+  }
+
+  if (data === "delete_dead_proxies") {
+    await bot.answerCallbackQuery(q.id);
+    try {
+      const count = await store.deleteDeadProxies();
+      return bot.sendMessage(chatId, 'Удалено мёртвых прокси: ' + count + '.');
+    } catch (e) {
+      return bot.sendMessage(chatId, 'Ошибка: ' + e.message);
+    }
+  }
+
   if (data === "add_account") {
     await bot.answerCallbackQuery(q.id);
     return bot.sendMessage(chatId, "Отправь: login:password:name:tag1,tag2");
@@ -745,12 +785,15 @@ bot.on("callback_query", async q => {
     const list = await store.loadAllProxies();
     const free = list.filter(p => p.status === 'free').length;
     const busy = list.filter(p => p.status === 'busy').length;
+    const dead = list.filter(p => p.status === 'dead').length;
     return bot.sendMessage(chatId,
-      'Прокси\n\nВсего: ' + list.length + '\nfree: ' + free + '\nbusy: ' + busy + '\n\nОтправь список прокси одним сообщением.',
+      'Прокси\n\nВсего: ' + list.length + '\nfree: ' + free + '\nbusy: ' + busy + '\ndead: ' + dead + '\n\nОтправь список прокси одним сообщением.',
       {
         reply_markup: {
           inline_keyboard: [
-            [{ text: "Проверить все", callback_data: "proxy_check" }]
+            [{ text: "Проверить все", callback_data: "proxy_check" }],
+            [{ text: "Очистить мёртвые", callback_data: "delete_dead_proxies" }],
+            [{ text: "Удалить ВСЕ прокси", callback_data: "delete_all_proxies" }]
           ]
         }
       });
