@@ -6,85 +6,44 @@ const { generateFingerprint } = require('./fingerprint');
 const TikTokMobile = require('./tiktok_uploader');
 const { acquireProxyAtomic, releaseProxyAtomic } = require('./accounts_store');
 const store = require('./accounts_store');
+const { createTempGmail, checkInbox, readMessage, searchInbox } = require('./gmail_bridge');
 
 const DEFAULT_BIO = process.env.GLOBAL_BIO ||
   'депать последние деньги только тут\n👉 zenodrop.fun\n👉тгк: zenodrp';
 
-function fetchJson(url, opts = {}) {
-  return new Promise((resolve, reject) => {
-    const body = opts.body ? JSON.stringify(opts.body) : null;
-    const u = new URL(url);
-    const req = https.request({
-      hostname: u.hostname,
-      path: u.pathname + u.search,
-      method: opts.method || 'GET',
-      headers: {
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-        'User-Agent': 'Mozilla/5.0',
-        ...(opts.headers || {}),
-        ...(body ? { 'Content-Length': Buffer.byteLength(body) } : {})
-      },
-      timeout: 20000
-    }, res => {
-      let data = '';
-      res.on('data', c => data += c);
-      res.on('end', () => {
-        try { resolve(JSON.parse(data)); }
-        catch { resolve(data); }
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-    if (body) req.write(body);
-    req.end();
-  });
-}
+/* ============================================================
+ *  EMAIL ЧЕРЕЗ TEMP-GMAIL (Python)
+ * ============================================================ */
 
-async function createMailTm() {
-  const domainRes = await fetchJson('https://api.mail.tm/domains?page=1');
-  const rawDomains = Array.isArray(domainRes?.['hydra:member'])
-    ? domainRes['hydra:member']
-    : Array.isArray(domainRes)
-      ? domainRes
-      : (domainRes && typeof domainRes === 'object' ? [domainRes] : []);
-
-  const domains = rawDomains.filter(x =>
-    x && typeof x.domain === 'string' && x.domain.trim().length > 0
-  );
-
-  if (!domains.length) {
-    const detail = domainRes?.message || domainRes?.detail || `Mail.tm вернул неожиданный ответ: ${JSON.stringify(domainRes).slice(0, 300)}`;
-    throw new Error(`Не удалось получить домен Mail.tm: ${detail}`);
-  }
-
-  const domain = domains[0].domain;
-  const addr = `${randStr(12)}@${domain}`;
-  const password = randStr(18);
-
-  await fetchJson('https://api.mail.tm/accounts', {
-    method: 'POST',
-    body: { address: addr, password }
-  });
-
-  const token = await fetchJson('https://api.mail.tm/token', {
-    method: 'POST',
-    body: { address: addr, password }
-  });
+async function createMailer() {
+  const { email } = await createTempGmail();
 
   return {
-    email: addr,
-    password,
-    token: token.token,
+    email,
     getMessages: async () => {
-      const list = await fetchJson('https://api.mail.tm/messages', {
-        headers: { 'Authorization': `Bearer ${token.token}` }
-      });
-      return list['hydra:member'] || [];
+      try {
+        const { emails } = await checkInbox();
+        return emails || [];
+      } catch (e) {
+        return [];
+      }
     },
-    readMessage: async (id) => fetchJson(`https://api.mail.tm/messages/${id}`, {
-      headers: { 'Authorization': `Bearer ${token.token}` }
-    })
+    readMessage: async (id) => {
+      try {
+        const { content } = await readMessage(id);
+        return content;
+      } catch (e) {
+        return null;
+      }
+    },
+    searchCode: async (keyword = 'TikTok') => {
+      try {
+        const { result } = await searchInbox(keyword);
+        return result;
+      } catch (e) {
+        return null;
+      }
+    }
   };
 }
 
@@ -114,17 +73,16 @@ function zenodropNickname(seq) {
   return `zenodrop_${String(seq).padStart(4, '0')}`;
 }
 
-/**
- * После успешной регистрации получаем уникальный ID пользователя
- * и собираем ссылку на профиль вида https://www.tiktok.com/@username
- */
 async function resolveProfileUrl(api, username) {
-  // Сначала пробуем через уникальный юзернейм
   if (username) {
     return `https://www.tiktok.com/@${username}`;
   }
   return null;
 }
+
+/* ============================================================
+ *  СОЗДАНИЕ ОДНОГО АККАУНТА
+ * ============================================================ */
 
 async function createOneAccount({ seq, nickname, niche, log = () => {}, shouldStop = () => false }) {
   const id = crypto.randomUUID().slice(0, 12);
@@ -161,8 +119,9 @@ async function createOneAccount({ seq, nickname, niche, log = () => {}, shouldSt
   });
 
   try {
+    // 1. Почта (temp-gmail через Python) + регистрация device
     const [mailResult, deviceResult] = await Promise.allSettled([
-      createMailTm(),
+      createMailer(),
       api.registerDevice()
     ]);
 
@@ -179,6 +138,7 @@ async function createOneAccount({ seq, nickname, niche, log = () => {}, shouldSt
 
     if (shouldStop()) throw new Error('stopped');
 
+    // 2. Регистрация аккаунта
     const signupResult = await api.signup(mailer.email, password, nick, birthDate);
 
     if (signupResult.captcha) {
@@ -192,14 +152,24 @@ async function createOneAccount({ seq, nickname, niche, log = () => {}, shouldSt
         if (shouldStop()) throw new Error('stopped');
         await new Promise(r => setTimeout(r, 3000));
         try {
-          const messages = await mailer.getMessages();
-          for (const msg of messages) {
-            const full = await mailer.readMessage(msg.id);
-            const text = JSON.stringify(full);
+          // Сначала пробуем через searchCode — ищем "TikTok" в письмах
+          const searchResult = await mailer.searchCode('TikTok');
+          if (searchResult) {
+            const text = JSON.stringify(searchResult);
             const m = text.match(/\b(\d{6})\b/);
             if (m) { code = m[1]; break; }
           }
-        } catch {}
+          // Фолбэк — читаем все письма
+          const messages = await mailer.getMessages();
+          for (const msg of messages) {
+            const full = await mailer.readMessage(msg.id || msg.mail_id);
+            const text = JSON.stringify(full);
+            const m2 = text.match(/\b(\d{6})\b/);
+            if (m2) { code = m2[1]; break; }
+          }
+        } catch (e) {
+          log(`[#${seq}] mail check err: ${e.message}`);
+        }
       }
       if (!code) throw new Error('no_code');
 
@@ -207,15 +177,17 @@ async function createOneAccount({ seq, nickname, niche, log = () => {}, shouldSt
       if (sub.error) throw new Error(`code_submit: ${sub.error}`);
     }
 
-    // Устанавливаем ник и получаем ссылку на профиль
+    // 3. Ник + ссылка на профиль
     await api.setNickname(nick).catch(e => log(`[#${seq}] nick: ${e.message}`));
     const profileUrl = await resolveProfileUrl(api, nick);
 
+    // 4. Аватарка
     const avatarPath = path.join(__dirname, 'avatar.png');
     if (fs.existsSync(avatarPath)) {
       await api.setAvatar(avatarPath).catch(e => log(`[#${seq}] avatar: ${e.message}`));
     }
 
+    // 5. Био
     await api.setBio(DEFAULT_BIO).catch(e => log(`[#${seq}] bio: ${e.message}`));
 
     const cookies = api.cookies;
@@ -247,6 +219,10 @@ async function createOneAccount({ seq, nickname, niche, log = () => {}, shouldSt
     }
   }
 }
+
+/* ============================================================
+ *  ПАРАЛЛЕЛЬНАЯ ФАБРИКА
+ * ============================================================ */
 
 async function createBatch({
   count,
@@ -297,7 +273,7 @@ async function createBatch({
 module.exports = {
   createOneAccount,
   createBatch,
-  createMailTm,
+  createMailer,
   zenodropNickname,
   DEFAULT_BIO
 };
