@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const https = require('https');
 const fs = require('fs');
+const zlib = require('zlib');
 const { signTikTokRequest } = require('./signer_bridge');
 
 const MOBILE_API_HOST = 'api16-normal-c-useast1a.tiktokv.com';
@@ -52,16 +53,15 @@ function pickRandom(arr, n) {
   return shuffle(arr).slice(0, n);
 }
 
-function buildHashtags(options = {}) {
-  const {
-    niche = NICHE_TAGS,
-    broad = BROAD_TAGS,
-    geo = GEO_TAGS,
-    month = String(new Date().getMonth() + 1).padStart(2, '0'),
-    brand = BRAND_TAG,
-    extra = [],
-    count = { broad: 3, niche: 4, geo: 1, seasonal: 1, trending: 1 }
-  } = options;
+function buildHashtags(options) {
+  options = options || {};
+  const niche = options.niche || NICHE_TAGS;
+  const broad = options.broad || BROAD_TAGS;
+  const geo = options.geo || GEO_TAGS;
+  const month = options.month || String(new Date().getMonth() + 1).padStart(2, '0');
+  const brand = options.brand || BRAND_TAG;
+  const extra = options.extra || [];
+  const count = options.count || { broad: 3, niche: 4, geo: 1, seasonal: 1, trending: 1 };
 
   const seasonal = SEASONAL_TAGS[month] || [];
   const tags = [
@@ -84,10 +84,12 @@ function buildHashtags(options = {}) {
   return unique.map(t => '#' + t);
 }
 
-function fetchTrendingHashtags(region = 'US', period = 7) {
+function fetchTrendingHashtags(region, period) {
+  region = region || 'US';
+  period = period || 7;
   return new Promise(resolve => {
-    const url = `https://ads.tiktok.com/creative_radar_api/v1/popular_trend/hashtag/list` +
-                `?period=${period}&page=1&limit=20&order_by=popular&country_code=${region}`;
+    const url = 'https://ads.tiktok.com/creative_radar_api/v1/popular_trend/hashtag/list' +
+                '?period=' + period + '&page=1&limit=20&order_by=popular&country_code=' + region;
     const req = https.get(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -101,7 +103,7 @@ function fetchTrendingHashtags(region = 'US', period = 7) {
       res.on('end', () => {
         try {
           const json = JSON.parse(data);
-          resolve((json?.data?.list || []).map(x => x.hashtag_name).filter(Boolean));
+          resolve((json && json.data && json.data.list || []).map(x => x.hashtag_name).filter(Boolean));
         } catch { resolve([]); }
       });
     });
@@ -116,7 +118,11 @@ async function refreshTrending() {
   return TRENDING_CACHE;
 }
 
-function httpRequest(url, options, body = null) {
+/* ============================================================
+ *  HTTP С РАСПАКОВКОЙ GZIP
+ * ============================================================ */
+
+function httpRequest(url, options, body) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const req = https.request({
@@ -126,14 +132,32 @@ function httpRequest(url, options, body = null) {
       headers: options.headers || {},
       timeout: 60000
     }, res => {
-      let out = '';
-      res.on('data', c => out += c);
+      const chunks = [];
+      const encoding = (res.headers['content-encoding'] || '').toLowerCase();
+
+      res.on('data', c => chunks.push(c));
       res.on('end', () => {
+        let buffer = Buffer.concat(chunks);
+
         try {
-          const json = JSON.parse(out);
+          if (encoding === 'gzip') {
+            buffer = zlib.gunzipSync(buffer);
+          } else if (encoding === 'deflate') {
+            buffer = zlib.inflateSync(buffer);
+          } else if (encoding === 'br') {
+            buffer = zlib.brotliDecompressSync(buffer);
+          }
+        } catch (e) {
+          console.error('[HTTP] decompress error:', e.message);
+        }
+
+        const text = buffer.toString('utf8');
+
+        try {
+          const json = JSON.parse(text);
           resolve({ status: res.statusCode, data: json });
         } catch {
-          resolve({ status: res.statusCode, data: { raw: out } });
+          resolve({ status: res.statusCode, data: { raw: text } });
         }
       });
     });
@@ -145,7 +169,8 @@ function httpRequest(url, options, body = null) {
 }
 
 class TikTokMobile {
-  constructor(config = {}) {
+  constructor(config) {
+    config = config || {};
     this.deviceId = config.deviceId || null;
     this.iid = config.iid || null;
     this.installId = config.installId || null;
@@ -206,13 +231,13 @@ class TikTokMobile {
     return headers;
   }
 
-  async signedRequest(pathname, params, payload = null) {
-    const allParams = { ...this.baseParams(), ...params };
-    const sig = await signTikTokRequest(allParams, payload, { version: 8404 });
+  async signedRequest(pathname, params, payload) {
+    const allParams = Object.assign({}, this.baseParams(), params);
+    const sig = await signTikTokRequest(allParams, payload || null, { version: 8404 });
     const headers = this.headersFor(sig);
 
     const body = new URLSearchParams(allParams).toString();
-    const url = `https://${MOBILE_API_HOST}${pathname}?${body}`;
+    const url = 'https://' + MOBILE_API_HOST + pathname + '?' + body;
 
     const res = await httpRequest(url, { method: payload ? 'POST' : 'GET', headers }, payload);
     return res.data;
@@ -231,18 +256,19 @@ class TikTokMobile {
     console.log('[DEVICE REGISTER] deviceId =', this.deviceId, '| iid =', this.iid);
 
     if (!this.deviceId || this.deviceId === '0') {
-      throw new Error('device_register failed: no device_id — проверь SignerPy и прокси');
+      throw new Error('device_register failed: no device_id');
     }
 
     return result;
   }
 
-  async signup(email, password, username, birthDate = { month: 6, day: 15, year: 1995 }) {
+  async signup(email, password, username, birthDate) {
+    birthDate = birthDate || { month: 6, day: 15, year: 1995 };
     const params = {
-      email,
-      password,
-      username,
-      birthday: `${birthDate.year}-${String(birthDate.month).padStart(2, '0')}-${String(birthDate.day).padStart(2, '0')}`,
+      email: email,
+      password: password,
+      username: username,
+      birthday: birthDate.year + '-' + String(birthDate.month).padStart(2, '0') + '-' + String(birthDate.day).padStart(2, '0'),
       mix_mode: '1'
     };
 
@@ -250,14 +276,14 @@ class TikTokMobile {
 
     console.log('[SIGNUP RAW]:', JSON.stringify(result).slice(0, 800));
 
-    if (result.message === 'captcha' || result.data?.captcha || result.error_code === 10001) {
+    if (result.message === 'captcha' || (result.data && result.data.captcha) || result.error_code === 10001) {
       return { captcha: true, raw: result };
     }
-    if (result.data?.need_verify || result.message === 'verify') {
-      return { needsCode: true, email };
+    if ((result.data && result.data.need_verify) || result.message === 'verify') {
+      return { needsCode: true, email: email };
     }
-    if (result.data?.session_key) {
-      this.cookies = `sessionid=${result.data.session_key}`;
+    if (result.data && result.data.session_key) {
+      this.cookies = 'sessionid=' + result.data.session_key;
       if (this.onCookies) await this.onCookies(this.cookies);
       return { success: true, raw: result };
     }
@@ -266,11 +292,11 @@ class TikTokMobile {
 
   async submitSignupCode(code) {
     const result = await this.signedRequest('/passport/user/verify/', {
-      code,
+      code: code,
       type: 'email'
     });
-    if (result.data?.session_key) {
-      this.cookies = `sessionid=${result.data.session_key}`;
+    if (result.data && result.data.session_key) {
+      this.cookies = 'sessionid=' + result.data.session_key;
       if (this.onCookies) await this.onCookies(this.cookies);
     }
     return result;
@@ -278,12 +304,12 @@ class TikTokMobile {
 
   async login(username, password) {
     const result = await this.signedRequest('/passport/user/login/', {
-      username,
-      password,
+      username: username,
+      password: password,
       mix_mode: '1'
     });
-    if (result.data?.session_key) {
-      this.cookies = `sessionid=${result.data.session_key}`;
+    if (result.data && result.data.session_key) {
+      this.cookies = 'sessionid=' + result.data.session_key;
       if (this.onCookies) await this.onCookies(this.cookies);
     }
     return result;
@@ -309,7 +335,8 @@ class TikTokMobile {
     });
   }
 
-  async uploadVideo(videoPath, caption, options = {}) {
+  async uploadVideo(videoPath, caption, options) {
+    options = options || {};
     if (!fs.existsSync(videoPath)) throw new Error('video not found');
     const stat = fs.statSync(videoPath);
     const size = stat.size;
@@ -350,12 +377,12 @@ class TikTokMobile {
     const text = [caption, ...hashtags].filter(Boolean).join(' ');
 
     const publishResult = await this.signedRequest('/aweme/v1/publish/', {
-      text,
+      text: text,
       upload_id: initResult.upload_id,
       video_id: initResult.video_id || ''
     });
 
-    return { success: true, hashtags, data: publishResult };
+    return { success: true, hashtags: hashtags, data: publishResult };
   }
 }
 
