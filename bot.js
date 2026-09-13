@@ -892,7 +892,7 @@ async function startFactory(chatId, job) {
   const stats = await store.proxyStats();
   await bot.sendMessage(chatId,
     `Фабрика запущена\n\n` +
-    `Аккаунтов: ${count}\nНиша: ${niche ? niche.join(', ') : 'общая'}\n ${` +
+`Аккаунтов: ${count}\nНиша: ${niche ? niche.join(', ') : 'общая'}\n` +
     `Прокси: ${stats.freedone} free / ${stats.total} всего\n` +
 }`);
     `Параллель}
