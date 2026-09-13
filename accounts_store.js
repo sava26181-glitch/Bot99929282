@@ -48,7 +48,7 @@ async function migrate() {
       posts_count INT DEFAULT 0
     )
   `);
-  await pool.query(`ALTER TABLE accounts ADD COLUMN IF NOT EXISTS profile_url TEXT`).catch(() => {});
+  await pool.query("ALTER TABLE accounts ADD COLUMN IF NOT EXISTS profile_url TEXT").catch(() => {});
   await pool.query(`
     CREATE TABLE IF NOT EXISTS proxies (
       id TEXT PRIMARY KEY,
@@ -123,7 +123,7 @@ async function saveCookies(accId, cookies) {
     return;
   }
   await pool.query(
-    `UPDATE accounts SET cookies_json=$1, updated_at=NOW() WHERE id=$2`,
+    "UPDATE accounts SET cookies_json=$1, updated_at=NOW() WHERE id=$2",
     [JSON.stringify(cookies), accId]
   );
 }
@@ -175,7 +175,7 @@ async function updateStatus(accId, status) {
     }
     return;
   }
-  await pool.query(`UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2`, [status, accId]);
+  await pool.query("UPDATE accounts SET status=$1, updated_at=NOW() WHERE id=$2", [status, accId]);
 }
 
 async function markPosted(accId) {
@@ -190,7 +190,7 @@ async function markPosted(accId) {
     return;
   }
   await pool.query(
-    `UPDATE accounts SET posts_count = posts_count + 1, last_post_at = NOW() WHERE id=$1`,
+    "UPDATE accounts SET posts_count = posts_count + 1, last_post_at = NOW() WHERE id=$1",
     [accId]
   );
 }
@@ -240,11 +240,11 @@ async function freeProxy() {
     return all.find(p => p.status === 'free') || null;
   }
   const { rows } = await pool.query(
-    `SELECT * FROM proxies WHERE status='free' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED`
+    "SELECT * FROM proxies WHERE status='free' ORDER BY created_at ASC LIMIT 1 FOR UPDATE SKIP LOCKED"
   );
   if (!rows.length) return null;
   const r = rows[0];
-  await pool.query(`UPDATE proxies SET status='busy' WHERE id=$1`, [r.id]);
+  await pool.query("UPDATE proxies SET status='busy' WHERE id=$1", [r.id]);
   return {
     id: r.id,
     server: r.server,
@@ -257,7 +257,7 @@ async function freeProxy() {
 
 async function releaseProxy(id) {
   if (!pool) return;
-  await pool.query(`UPDATE proxies SET status='free', account_id=NULL WHERE id=$1`, [id]);
+  await pool.query("UPDATE proxies SET status='free', account_id=NULL WHERE id=$1", [id]);
 }
 
 async function acquireProxyAtomic(accountId, country = null) {
@@ -280,26 +280,20 @@ async function acquireProxyAtomic(accountId, country = null) {
   }
 
   const query = country
-    ? `SELECT * FROM proxies WHERE status='free' AND country=$1
-       ORDER BY last_checked ASC NULLS FIRST
-       LIMIT 1 FOR UPDATE SKIP LOCKED`
-    : `SELECT * FROM proxies WHERE status='free'
-       ORDER BY last_checked ASC NULLS FIRST
-       LIMIT 1 FOR UPDATE SKIP LOCKED`;
+    ? "SELECT * FROM proxies WHERE status='free' AND country=$1 ORDER BY last_checked ASC NULLS FIRST LIMIT 1 FOR UPDATE SKIP LOCKED"
+    : "SELECT * FROM proxies WHERE status='free' ORDER BY last_checked ASC NULLS FIRST LIMIT 1 FOR UPDATE SKIP LOCKED";
 
   const params = country ? [country] : [];
   const { rows } = await pool.query(query, params);
 
   if (!rows.length) {
     const { rows: fallback } = await pool.query(
-      `SELECT * FROM proxies WHERE status='free'
-       ORDER BY last_checked ASC NULLS FIRST
-       LIMIT 1 FOR UPDATE SKIP LOCKED`
+      "SELECT * FROM proxies WHERE status='free' ORDER BY last_checked ASC NULLS FIRST LIMIT 1 FOR UPDATE SKIP LOCKED"
     );
     if (!fallback.length) return null;
     const p = fallback[0];
     await pool.query(
-      `UPDATE proxies SET status='busy', account_id=$1 WHERE id=$2`,
+      "UPDATE proxies SET status='busy', account_id=$1 WHERE id=$2",
       [accountId, p.id]
     );
     return {
@@ -310,7 +304,7 @@ async function acquireProxyAtomic(accountId, country = null) {
 
   const p = rows[0];
   await pool.query(
-    `UPDATE proxies SET status='busy', account_id=$1 WHERE id=$2`,
+    "UPDATE proxies SET status='busy', account_id=$1 WHERE id=$2",
     [accountId, p.id]
   );
   return {
@@ -333,7 +327,7 @@ async function releaseProxyAtomic(proxyId) {
     return;
   }
   await pool.query(
-    `UPDATE proxies SET status='free', account_id=NULL, last_checked=NOW() WHERE id=$1`,
+    "UPDATE proxies SET status='free', account_id=NULL, last_checked=NOW() WHERE id=$1",
     [proxyId]
   );
 }
@@ -377,7 +371,41 @@ async function deleteAllAccounts() {
     return;
   }
   await pool.query('DELETE FROM accounts');
-  await pool.query(`UPDATE proxies SET status='free', account_id=NULL`);
+  await pool.query("UPDATE proxies SET status='free', account_id=NULL");
+}
+
+async function deleteAllProxies() {
+  if (!pool) {
+    const file = path.join(__dirname, 'proxies.json');
+    if (fs.existsSync(file)) {
+      const all = JSON.parse(fs.readFileSync(file));
+      const count = Object.keys(all).length;
+      fs.writeFileSync(file, '{}');
+      return count;
+    }
+    return 0;
+  }
+  const { rowCount } = await pool.query('DELETE FROM proxies');
+  return rowCount;
+}
+
+async function deleteDeadProxies() {
+  if (!pool) {
+    const file = path.join(__dirname, 'proxies.json');
+    if (!fs.existsSync(file)) return 0;
+    const all = JSON.parse(fs.readFileSync(file));
+    let count = 0;
+    for (const id of Object.keys(all)) {
+      if (all[id].status === 'dead') {
+        delete all[id];
+        count++;
+      }
+    }
+    fs.writeFileSync(file, JSON.stringify(all, null, 2));
+    return count;
+  }
+  const { rowCount } = await pool.query("DELETE FROM proxies WHERE status='dead'");
+  return rowCount;
 }
 
 module.exports = {
@@ -395,5 +423,7 @@ module.exports = {
   acquireProxyAtomic,
   releaseProxyAtomic,
   proxyStats,
-  deleteAllAccounts
+  deleteAllAccounts,
+  deleteAllProxies,
+  deleteDeadProxies
 };
