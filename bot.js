@@ -14,7 +14,6 @@ const { generateFingerprint } = require("./fingerprint");
 const proxyMgr = require("./proxy_manager");
 const factory = require("./account_factory");
 const store = require("./accounts_store");
-const captchaSolver = require("./captcha_solver");
 
 /* ============================================================
  *  КОНФИГ
@@ -46,7 +45,6 @@ const factoryJobs = new Map();
 const avatarWaiting = new Map();
 const bioWaiting = new Map();
 
-/* Глобальный флаг остановки всех процессов */
 const stopFlags = {
   factory: false,
   warm: false,
@@ -367,11 +365,11 @@ function showSettings(chatId) {
 
 bot.onText(/^\/start$/, msg => {
   bot.sendMessage(msg.chat.id,
-    "🤖 *Zenodrop TikTok Farm*\n\n" +
+    "🤖 Zenodrop TikTok Farm\n\n" +
     "• /menu — меню\n" +
     "• Отправь видео или ссылку TikTok — обработка\n" +
-    "• Отправь `login:password:name:tag1,tag2` — добавить аккаунт вручную",
-    { parse_mode: "Markdown", reply_markup: mainMenuKeyboard() });
+    "• Отправь login:password:name:tag1,tag2 — добавить аккаунт вручную",
+    { reply_markup: mainMenuKeyboard() });
 });
 
 bot.onText(/^\/menu$/, msg => {
@@ -385,7 +383,7 @@ bot.onText(/^\/menu$/, msg => {
 bot.on("video", async msg => {
   const chatId = msg.chat.id;
   const size = Number(msg.video.file_size || 0);
-  if (size && size > MAX_MB * 1024 * 1024) return bot.sendMessage(chatId, `❌ Максимум ${MAX_MB} МБ.`);
+  if (size && size > MAX_MB * 1024 * 1024) return bot.sendMessage(chatId, `Максимум ${MAX_MB} МБ.`);
 
   const input = path.join(TMP, `${crypto.randomUUID()}_input.mp4`);
   try {
@@ -410,7 +408,7 @@ bot.on("video", async msg => {
   } catch (e) {
     console.error(e);
     cleanup(input);
-    bot.sendMessage(chatId, "❌ Не удалось получить видео.");
+    bot.sendMessage(chatId, "Не удалось получить видео.");
   }
 });
 
@@ -440,11 +438,11 @@ bot.on("photo", async msg => {
     });
 
     avatarWaiting.delete(chatId);
-    await bot.sendMessage(chatId, `✅ Сохранено. Ставлю на ${accounts.size} аккаунтов...`);
+    await bot.sendMessage(chatId, `Сохранено. Ставлю на ${accounts.size} аккаунтов...`);
     await applyAvatarAll(chatId, AVATAR_PATH);
   } catch (e) {
     avatarWaiting.delete(chatId);
-    await bot.sendMessage(chatId, `❌ ${e.message}`);
+    await bot.sendMessage(chatId, `${e.message}`);
   }
 });
 
@@ -453,7 +451,7 @@ bot.on("document", async msg => {
   if (!avatarWaiting.get(chatId)) return;
   const doc = msg.document;
   if (!doc.mime_type || !doc.mime_type.startsWith('image/')) {
-    return bot.sendMessage(chatId, "❌ Это не изображение.");
+    return bot.sendMessage(chatId, "Это не изображение.");
   }
 
   try {
@@ -471,11 +469,11 @@ bot.on("document", async msg => {
     });
 
     avatarWaiting.delete(chatId);
-    await bot.sendMessage(chatId, `✅ Сохранено. Ставлю на ${accounts.size} аккаунтов...`);
+    await bot.sendMessage(chatId, `Сохранено. Ставлю на ${accounts.size} аккаунтов...`);
     await applyAvatarAll(chatId, AVATAR_PATH);
   } catch (e) {
     avatarWaiting.delete(chatId);
-    await bot.sendMessage(chatId, `❌ ${e.message}`);
+    await bot.sendMessage(chatId, `${e.message}`);
   }
 });
 
@@ -491,7 +489,7 @@ bot.on("message", async msg => {
   if (bioWaiting.get(chatId)) {
     bioWaiting.delete(chatId);
     const bio = text === '-' ? DEFAULT_BIO : text;
-    await bot.sendMessage(chatId, `📝 Ставлю био на ${accounts.size} аккаунтов...`);
+    await bot.sendMessage(chatId, `Ставлю био на ${accounts.size} аккаунтов...`);
     await applyBioAll(chatId, bio);
     return;
   }
@@ -500,10 +498,10 @@ bot.on("message", async msg => {
   if (job && job.waiting) {
     if (job.waiting === "count") {
       const n = Number(text);
-      if (!Number.isFinite(n) || n < 1 || n > 100) return bot.sendMessage(chatId, "❌ Введи число 1..100");
+      if (!Number.isFinite(n) || n < 1 || n > 100) return bot.sendMessage(chatId, "Введи число 1..100");
       job.count = n;
       job.waiting = "niche";
-      return bot.sendMessage(chatId, "📝 Введи нишу через запятую (или `-` чтобы пропустить):");
+      return bot.sendMessage(chatId, "Введи нишу через запятую (или - чтобы пропустить):");
     }
     if (job.waiting === "niche") {
       job.niche = text === "-" ? null : text.split(',').map(s => s.trim().toLowerCase());
@@ -529,12 +527,12 @@ bot.on("message", async msg => {
       await showSettings(chatId);
     } catch (e) {
       cleanup(input);
-      await bot.sendMessage(chatId, `❌ ${String(e.message).slice(0, 800)}`);
+      await bot.sendMessage(chatId, `${String(e.message).slice(0, 800)}`);
     }
     return;
   }
 
-  if (isUrl(text)) return bot.sendMessage(chatId, "❌ Только TikTok ссылки.");
+  if (isUrl(text)) return bot.sendMessage(chatId, "Только TikTok ссылки.");
 
   const accMatch = text.match(/^([^:]+):([^:]+):([^:]+)(?::(.+))?$/);
   if (accMatch && !sessions.get(chatId)) {
@@ -555,9 +553,7 @@ bot.on("message", async msg => {
     });
     accounts.set(id, acc);
     await store.saveAccount(acc);
-    return bot.sendMessage(chatId,
-      `✅ Аккаунт "${acc.name}" добавлен.\nID: \`${id}\``,
-      { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, `Аккаунт "${acc.name}" добавлен.\nID: ${id}`);
   }
 
   const s = sessions.get(chatId);
@@ -566,13 +562,13 @@ bot.on("message", async msg => {
   if (s.waiting === "time") {
     const v = Number(text.replace(",", "."));
     if (!Number.isFinite(v) || v < 0 || v >= s.videoDuration - 0.03)
-      return bot.sendMessage(chatId, `❌ 0..${(s.videoDuration - 0.03).toFixed(2)}`);
+      return bot.sendMessage(chatId, `0..${(s.videoDuration - 0.03).toFixed(2)}`);
     s.insertAt = v; s.waiting = null;
     return showSettings(chatId);
   }
   if (s.waiting === "duration") {
     const v = Number(text.replace(",", "."));
-    if (!Number.isFinite(v) || v < 0.5 || v > 60) return bot.sendMessage(chatId, "❌ 0.5..60");
+    if (!Number.isFinite(v) || v < 0.5 || v > 60) return bot.sendMessage(chatId, "0.5..60");
     s.duration = v; s.waiting = null;
     return showSettings(chatId);
   }
@@ -596,9 +592,9 @@ bot.on("message", async msg => {
       /^[^\s@]+:[^\s@]+@[^\s:]+:\d+$/.test(l)
     );
     if (looksLikeProxy) {
-      await bot.sendMessage(chatId, `🌐 Импортирую ${lines.length} строк...`);
+      await bot.sendMessage(chatId, `Импортирую ${lines.length} строк...`);
       const r = await proxyMgr.importProxies(text, 'telegram');
-      return bot.sendMessage(chatId, `✅ Добавлено: ${r.added}\n⏭ Пропущено: ${r.skipped}`);
+      return bot.sendMessage(chatId, `Добавлено: ${r.added}\nПропущено: ${r.skipped}`);
     }
   }
 });
@@ -612,30 +608,19 @@ bot.on("callback_query", async q => {
   const s = sessions.get(chatId);
   const data = q.data;
 
-  /* --- СТОП ВСЕГО --- */
   if (data === "stop_all") {
     await bot.answerCallbackQuery(q.id);
     stopFlags.factory = true;
     stopFlags.warm = true;
     stopFlags.post = true;
-    return bot.sendMessage(chatId,
-      "⛔ *Сигнал остановки отправлен*\n\n" +
-      "Все активные процессы прекратятся после текущей операции.\n" +
-      "Прокси освободятся автоматически.",
-      { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, "Сигнал остановки отправлен. Все процессы прекратятся после текущей операции.");
   }
 
-  /* --- УДАЛИТЬ ВСЕ АККАУНТЫ --- */
   if (data === "delete_all_accounts") {
     await bot.answerCallbackQuery(q.id);
     return bot.sendMessage(chatId,
-      `⚠️ *Удалить все аккаунты?*\n\n` +
-      `Будет удалено: ${accounts.size} аккаунтов\n` +
-      `База данных очищена\n` +
-      `Прокси освобождены\n\n` +
-      `Это действие *нельзя отменить*.`,
+      `Удалить все аккаунты?\n\nБудет удалено: ${accounts.size} аккаунтов\nБаза данных очищена\nПрокси освобождены\n\nЭто действие нельзя отменить.`,
       {
-        parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             [{ text: "🗑 ДА, УДАЛИТЬ ВСЁ", callback_data: "delete_all_confirm" }],
@@ -649,87 +634,79 @@ bot.on("callback_query", async q => {
     await bot.answerCallbackQuery(q.id);
     try {
       const count = accounts.size;
-      // Освобождаем прокси и удаляем из памяти
       for (const [id, acc] of accounts) {
         if (acc.proxy?.id) {
           await store.releaseProxyAtomic(acc.proxy.id).catch(() => {});
         }
       }
       accounts.clear();
-      // Чистим базу
       await store.deleteAllAccounts();
-      return bot.sendMessage(chatId, `✅ Удалено аккаунтов: ${count}. База очищена.`);
+      return bot.sendMessage(chatId, `Удалено аккаунтов: ${count}. База очищена.`);
     } catch (e) {
-      return bot.sendMessage(chatId, `❌ Ошибка удаления: ${e.message}`);
+      return bot.sendMessage(chatId, `Ошибка удаления: ${e.message}`);
     }
   }
 
   if (data === "delete_all_cancel") {
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId, "❌ Удаление отменено.");
+    return bot.sendMessage(chatId, "Удаление отменено.");
   }
 
-  /* --- МЕНЮ --- */
   if (data === "add_account") {
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId,
-      "➕ `login:password:name:tag1,tag2`",
-      { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, "Отправь: login:password:name:tag1,tag2");
   }
 
   if (data === "list_accounts") {
     await bot.answerCallbackQuery(q.id);
-    if (accounts.size === 0) return bot.sendMessage(chatId, "📋 Пусто.");
-    let txt = `📋 *Аккаунты (${accounts.size}):*\n\n`;
+    if (accounts.size === 0) return bot.sendMessage(chatId, "Пусто.");
+    let txt = `Аккаунты (${accounts.size}):\n\n`;
     let i = 1;
     for (const [id, acc] of accounts) {
-      txt += `${i++}. *${acc.name}* (\`${id}\`)\n`;
+      txt += `${i++}. ${acc.name} (${id})\n`;
       txt += `   ${acc.login} | ${acc.status}\n`;
       if (acc.profileUrl) {
-        txt += `   🔗 [Профиль](${acc.profileUrl})\n`;
+        txt += `   ${acc.profileUrl}\n`;
       } else {
-        txt += `   🔗 нет ссылки\n`;
+        txt += `   нет ссылки\n`;
       }
       txt += `\n`;
       if (i > 30) { txt += `... и ещё ${accounts.size - 30}\n`; break; }
     }
-    return bot.sendMessage(chatId, txt, {
-      parse_mode: "Markdown",
-      disable_web_page_preview: true
-    });
+    return bot.sendMessage(chatId, txt);
   }
 
   if (data === "status") {
     await bot.answerCallbackQuery(q.id);
     const stats = await store.proxyStats();
-    let txt = `📊 *Статус*\n\nАккаунтов: ${accounts.size}\nСессий: ${sessions.size}\n\n`;
-    txt += `Прокси: всего ${stats.total}\n🟢 free: ${stats.free}\n🔴 busy: ${stats.busy}\n💀 dead: ${stats.dead}\n\n`;
-    txt += `⛔ Остановка: фабрика=${stopFlags.factory} прогрев=${stopFlags.warm} постинг=${stopFlags.post}\n\n`;
+    let txt = `Статус\n\nАккаунтов: ${accounts.size}\nСессий: ${sessions.size}\n\n`;
+    txt += `Прокси: всего ${stats.total}\nfree: ${stats.free}\nbusy: ${stats.busy}\ndead: ${stats.dead}\n\n`;
+    txt += `Остановка: фабрика=${stopFlags.factory} прогрев=${stopFlags.warm} постинг=${stopFlags.post}\n\n`;
     const accStats = {};
     for (const acc of accounts.values()) accStats[acc.status] = (accStats[acc.status] || 0) + 1;
     for (const [st, cnt] of Object.entries(accStats)) txt += `${st}: ${cnt}\n`;
-    return bot.sendMessage(chatId, txt, { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, txt);
   }
 
   if (data === "set_avatar_all") {
     await bot.answerCallbackQuery(q.id);
-    if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
+    if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
     avatarWaiting.set(chatId, true);
-    return bot.sendMessage(chatId, "🖼 Отправь изображение.");
+    return bot.sendMessage(chatId, "Отправь изображение.");
   }
 
   if (data === "set_bio_all") {
     await bot.answerCallbackQuery(q.id);
-    if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
+    if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
     bioWaiting.set(chatId, true);
-    return bot.sendMessage(chatId, `📝 Отправь текст био. Дефолт:\n\n${DEFAULT_BIO}\n\nИли \`-\` для дефолта.`);
+    return bot.sendMessage(chatId, `Отправь текст био. Дефолт:\n\n${DEFAULT_BIO}\n\nИли - для дефолта.`);
   }
 
   if (data === "factory") {
     await bot.answerCallbackQuery(q.id);
     stopFlags.factory = false;
     factoryJobs.set(chatId, { waiting: "count" });
-    return bot.sendMessage(chatId, "🏭 Сколько аккаунтов создать? (1..100)");
+    return bot.sendMessage(chatId, "Сколько аккаунтов создать? (1..100)");
   }
 
   if (data === "proxies") {
@@ -738,10 +715,8 @@ bot.on("callback_query", async q => {
     const free = list.filter(p => p.status === 'free').length;
     const busy = list.filter(p => p.status === 'busy').length;
     return bot.sendMessage(chatId,
-      `🌐 *Прокси*\n\nВсего: ${list.length}\n🟢 free: ${free}\n🔴 busy: ${busy}\n\n` +
-      `Отправь список прокси одним сообщением.`,
+      `Прокси\n\nВсего: ${list.length}\nfree: ${free}\nbusy: ${busy}\n\nОтправь список прокси одним сообщением.`,
       {
-        parse_mode: "Markdown",
         reply_markup: {
           inline_keyboard: [
             [{ text: "📥 Проверить все", callback_data: "proxy_check" }]
@@ -753,24 +728,24 @@ bot.on("callback_query", async q => {
   if (data === "proxy_check") {
     await bot.answerCallbackQuery(q.id);
     const list = await store.loadAllProxies();
-    await bot.sendMessage(chatId, `🔍 Проверяю ${list.length} прокси...`);
+    await bot.sendMessage(chatId, `Проверяю ${list.length} прокси...`);
     let ok = 0, fail = 0;
     for (const p of list) {
       const r = await proxyMgr.checkProxy(p);
       if (r.ok) ok++;
       else { fail++; await store.saveProxy({ ...p, status: 'dead' }); }
     }
-    return bot.sendMessage(chatId, `✅ Живых: ${ok}\n❌ Мёртвых: ${fail}`);
+    return bot.sendMessage(chatId, `Живых: ${ok}\nМёртвых: ${fail}`);
   }
 
   if (data === "change_nick") {
     await bot.answerCallbackQuery(q.id);
-    if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
+    if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
     const rows = [];
     for (const [id, acc] of accounts) {
       rows.push([{ text: `🏷 ${acc.name}`, callback_data: `nick_${id}` }]);
     }
-    return bot.sendMessage(chatId, "🏷 Выбери аккаунт:", { reply_markup: { inline_keyboard: rows } });
+    return bot.sendMessage(chatId, "Выбери аккаунт:", { reply_markup: { inline_keyboard: rows } });
   }
 
   if (data.startsWith("nick_")) {
@@ -779,7 +754,7 @@ bot.on("callback_query", async q => {
     accounts.forEach(a => a.__waitNick = false);
     const acc = accounts.get(id);
     if (acc) acc.__waitNick = true;
-    return bot.sendMessage(chatId, `🏷 Введи новый ник для *${acc?.name}*:`, { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, `Введи новый ник для ${acc?.name}:`);
   }
 
   if (data === "warm_all") {
@@ -798,9 +773,9 @@ bot.on("callback_query", async q => {
     const id = data.slice("preview_tags_".length);
     await bot.answerCallbackQuery(q.id);
     const acc = accounts.get(id);
-    if (!acc) return bot.sendMessage(chatId, "❌ Нет.");
+    if (!acc) return bot.sendMessage(chatId, "Нет.");
     const tags = buildHashtags({ niche: acc.niche || undefined });
-    return bot.sendMessage(chatId, `🏷 *${acc.name}*\n\n${tags.join(' ')}`, { parse_mode: "Markdown" });
+    return bot.sendMessage(chatId, `Хештеги ${acc.name}:\n\n${tags.join(' ')}`);
   }
 
   if (!s) return bot.answerCallbackQuery(q.id, { text: "Сначала видео." });
@@ -808,12 +783,12 @@ bot.on("callback_query", async q => {
   if (data === "time") {
     s.waiting = "time";
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId, "⏱ На какой секунде?");
+    return bot.sendMessage(chatId, "На какой секунде?");
   }
   if (data === "duration") {
     s.waiting = "duration";
     await bot.answerCallbackQuery(q.id);
-    return bot.sendMessage(chatId, "⏳ Длительность в секундах?");
+    return bot.sendMessage(chatId, "Длительность в секундах?");
   }
   if (/^count[123]$/.test(data)) {
     s.count = Number(data.slice(-1));
@@ -825,15 +800,15 @@ bot.on("callback_query", async q => {
     await bot.answerCallbackQuery(q.id);
     const output = path.join(TMP, `${crypto.randomUUID()}_rendered.mp4`);
     try {
-      await bot.sendMessage(chatId, "🎬 Вставляю баннер...");
+      await bot.sendMessage(chatId, "Вставляю баннер...");
       await renderVideo(s.input, output, s.insertAt, s.duration, s.count);
       s.rendered = output;
-      await bot.sendVideo(chatId, output, { caption: "✅ Готово", supports_streaming: true });
-      if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
-      await bot.sendMessage(chatId, "📤 Куда заливаем?", { reply_markup: accountsKeyboard("📤") });
+      await bot.sendVideo(chatId, output, { caption: "Готово", supports_streaming: true });
+      if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
+      await bot.sendMessage(chatId, "Куда заливаем?", { reply_markup: accountsKeyboard("📤") });
     } catch (e) {
       console.error(e);
-      await bot.sendMessage(chatId, `❌ ${String(e.message).slice(0, 1000)}`);
+      await bot.sendMessage(chatId, `${String(e.message).slice(0, 1000)}`);
     }
     return;
   }
@@ -841,7 +816,7 @@ bot.on("callback_query", async q => {
   if (data.startsWith("post_")) {
     const id = data.slice(5);
     await bot.answerCallbackQuery(q.id);
-    if (!s?.rendered) return bot.sendMessage(chatId, "❌ Сначала баннер.");
+    if (!s?.rendered) return bot.sendMessage(chatId, "Сначала баннер.");
     stopFlags.post = false;
     return startPost(chatId, id, s);
   }
@@ -858,18 +833,18 @@ bot.on("message", async msg => {
   for (const [id, acc] of accounts) {
     if (acc.__waitNick) {
       acc.__waitNick = false;
-      await bot.sendMessage(chatId, `🏷 Меняю ник на "${text}"...`);
+      await bot.sendMessage(chatId, `Меняю ник на "${text}"...`);
       try {
         const r = await acc.uploader.setNickname(text);
         if (r && !r.error) {
           acc.name = text;
           await store.saveAccount(acc);
-          await bot.sendMessage(chatId, `✅ Ник изменён.`);
+          await bot.sendMessage(chatId, `Ник изменён.`);
         } else {
-          await bot.sendMessage(chatId, `❌ ${r?.error || 'failed'}`);
+          await bot.sendMessage(chatId, `${r?.error || 'failed'}`);
         }
       } catch (e) {
-        await bot.sendMessage(chatId, `❌ ${e.message}`);
+        await bot.sendMessage(chatId, `${e.message}`);
       }
       return;
     }
@@ -877,7 +852,7 @@ bot.on("message", async msg => {
 });
 
 /* ============================================================
- *  ФАБРИКА (с остановкой)
+ *  ФАБРИКА
  * ============================================================ */
 
 async function startFactory(chatId, job) {
@@ -887,12 +862,11 @@ async function startFactory(chatId, job) {
 
   const stats = await store.proxyStats();
   await bot.sendMessage(chatId,
-    `🏭 *Фабрика запущена*\n\n` +
+    `Фабрика запущена\n\n` +
     `Аккаунтов: ${count}\nНиша: ${niche ? niche.join(', ') : 'общая'}\n` +
     `Прокси: ${stats.free} free / ${stats.total} всего\n` +
     `Параллельность: 10\n\n` +
-    `⛔ Для остановки: /menu → ⛔ Остановить всё`,
-    { parse_mode: "Markdown" });
+    `Для остановки: /menu -> Остановить всё`);
 
   let lastUpdate = 0;
   try {
@@ -906,8 +880,7 @@ async function startFactory(chatId, job) {
         const pct = Math.floor(done / total * 100);
         const bar = '█'.repeat(Math.floor(pct / 5)) + '░'.repeat(20 - Math.floor(pct / 5));
         await bot.sendMessage(chatId,
-          `🏭 *Прогресс*\n\n${bar} ${pct}%\n\n✅ OK: ${ok}\n❌ Fail: ${fail}\n🔄 В работе: ${inFlight}\n⏱ ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`,
-          { parse_mode: "Markdown" }).catch(() => {});
+          `Прогресс\n\n${bar} ${pct}%\n\nOK: ${ok}\nFail: ${fail}\nВ работе: ${inFlight}\nВремя: ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, '0')}`).catch(() => {});
       }
     });
 
@@ -924,55 +897,54 @@ async function startFactory(chatId, job) {
     const min = Math.floor(r.elapsed / 60);
     const sec = r.elapsed % 60;
     await bot.sendMessage(chatId,
-      `✅ *Фабрика завершена*${r.stopped ? ' (ОСТАНОВЛЕНА)' : ''}\n\n` +
+      `Фабрика завершена${r.stopped ? ' (ОСТАНОВЛЕНА)' : ''}\n\n` +
       `Создано: ${r.ok.length}\nОшибок: ${r.fail.length}\nВремя: ${min}м ${sec}с\n\n` +
-      (r.fail.length ? `*Причины:*\n` + Object.entries(r.fail.reduce((a, f) => { a[f.reason] = (a[f.reason] || 0) + 1; return a; }, {})).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `• ${k}: ${v}`).join('\n') : ''),
-      { parse_mode: "Markdown" });
+      (r.fail.length ? `Причины:\n` + Object.entries(r.fail.reduce((a, f) => { a[f.reason] = (a[f.reason] || 0) + 1; return a; }, {})).sort((a, b) => b[1] - a[1]).slice(0, 5).map(([k, v]) => `• ${k}: ${v}`).join('\n') : ''));
   } catch (e) {
     console.error('factory error:', e);
-    await bot.sendMessage(chatId, `❌ Фабрика упала: ${e.message}`);
+    await bot.sendMessage(chatId, `Фабрика упала: ${e.message}`);
   }
 }
 
 /* ============================================================
- *  ПРОГРЕВ (с остановкой)
+ *  ПРОГРЕВ
  * ============================================================ */
 
 async function startWarm(chatId, id) {
   const acc = accounts.get(id);
-  if (!acc) return bot.sendMessage(chatId, "❌ Нет аккаунта.");
+  if (!acc) return bot.sendMessage(chatId, "Нет аккаунта.");
   acc.status = "warming";
   await store.updateStatus(id, "warming");
-  await bot.sendMessage(chatId, `🔥 Прогрев ${acc.name}...`);
+  await bot.sendMessage(chatId, `Прогрев ${acc.name}...`);
   try {
     const warmer = new TikTokMobileWarmer(acc.uploader);
     await warmer.warmAccount(3, 20, () => stopFlags.warm);
     acc.status = "warmed";
     await store.updateStatus(id, "warmed");
-    await bot.sendMessage(chatId, `✅ ${acc.name} прогрет!`);
+    await bot.sendMessage(chatId, `${acc.name} прогрет!`);
   } catch (e) {
     acc.status = "error";
     await store.updateStatus(id, "error");
-    await bot.sendMessage(chatId, `❌ ${acc.name}: ${e.message}`);
+    await bot.sendMessage(chatId, `${acc.name}: ${e.message}`);
   }
 }
 
 async function startWarmAll(chatId) {
-  if (accounts.size === 0) return bot.sendMessage(chatId, "❌ Нет аккаунтов.");
-  await bot.sendMessage(chatId, `🔥 Прогреваю ${accounts.size} последовательно...\n⛔ Стоп: /menu → ⛔ Остановить всё`);
+  if (accounts.size === 0) return bot.sendMessage(chatId, "Нет аккаунтов.");
+  await bot.sendMessage(chatId, `Прогреваю ${accounts.size} последовательно...`);
   let done = 0;
   for (const [id, acc] of accounts) {
     if (stopFlags.warm) {
-      await bot.sendMessage(chatId, `⛔ Остановлено на ${done}/${accounts.size}`);
+      await bot.sendMessage(chatId, `Остановлено на ${done}/${accounts.size}`);
       return;
     }
     if (acc.status === 'warming') continue;
     try { await startWarm(chatId, id); } catch {}
     done++;
-    if (done % 5 === 0) await bot.sendMessage(chatId, `⏳ ${done}/${accounts.size}`).catch(() => {});
+    if (done % 5 === 0) await bot.sendMessage(chatId, `${done}/${accounts.size}`).catch(() => {});
     await new Promise(r => setTimeout(r, 30_000));
   }
-  await bot.sendMessage(chatId, `✅ Прогрев завершён: ${done}`);
+  await bot.sendMessage(chatId, `Прогрев завершён: ${done}`);
 }
 
 /* ============================================================
@@ -989,11 +961,11 @@ async function applyAvatarAll(chatId, imagePath) {
       else fail++;
     } catch (e) { fail++; }
     if (done % 5 === 0 || done === accounts.size) {
-      await bot.sendMessage(chatId, `🖼 ${done}/${accounts.size} (✅${ok} ❌${fail})`).catch(() => {});
+      await bot.sendMessage(chatId, `${done}/${accounts.size} (OK: ${ok} FAIL: ${fail})`).catch(() => {});
     }
     await new Promise(r => setTimeout(r, 15000));
   }
-  await bot.sendMessage(chatId, `✅ Аватарка: ${ok} успешно, ${fail} ошибок.`);
+  await bot.sendMessage(chatId, `Аватарка: ${ok} успешно, ${fail} ошибок.`);
 }
 
 async function applyBioAll(chatId, bioText) {
@@ -1006,11 +978,11 @@ async function applyBioAll(chatId, bioText) {
       else fail++;
     } catch (e) { fail++; }
     if (done % 5 === 0 || done === accounts.size) {
-      await bot.sendMessage(chatId, `📝 ${done}/${accounts.size} (✅${ok} ❌${fail})`).catch(() => {});
+      await bot.sendMessage(chatId, `${done}/${accounts.size} (OK: ${ok} FAIL: ${fail})`).catch(() => {});
     }
     await new Promise(r => setTimeout(r, 15000));
   }
-  await bot.sendMessage(chatId, `✅ Био: ${ok} успешно, ${fail} ошибок.`);
+  await bot.sendMessage(chatId, `Био: ${ok} успешно, ${fail} ошибок.`);
 }
 
 /* ============================================================
@@ -1019,25 +991,25 @@ async function applyBioAll(chatId, bioText) {
 
 async function startPost(chatId, id, session) {
   const acc = accounts.get(id);
-  if (!acc) return bot.sendMessage(chatId, "❌ Нет аккаунта.");
+  if (!acc) return bot.sendMessage(chatId, "Нет аккаунта.");
   acc.status = "posting";
   await store.updateStatus(id, "posting");
-  await bot.sendMessage(chatId, `📤 Заливаю в ${acc.name}...`);
+  await bot.sendMessage(chatId, `Заливаю в ${acc.name}...`);
 
   try {
     const hashtags = buildHashtags({ niche: acc.niche || undefined });
-    await bot.sendMessage(chatId, `🏷 ${hashtags.join(' ')}`);
-    const caption = session.caption || "Check this out 🔥";
+    await bot.sendMessage(chatId, `${hashtags.join(' ')}`);
+    const caption = session.caption || "Check this out";
     const r = await acc.uploader.uploadVideo(session.rendered, caption, { hashtags });
     acc.status = "posted";
     acc.postsCount = (acc.postsCount || 0) + 1;
     await store.updateStatus(id, "posted");
     await store.markPosted(id);
-    await bot.sendMessage(chatId, `✅ ${acc.name} → ${r.url || 'OK'}`);
+    await bot.sendMessage(chatId, `${acc.name} -> ${r.url || 'OK'}`);
   } catch (e) {
     acc.status = "error";
     await store.updateStatus(id, "error");
-    await bot.sendMessage(chatId, `❌ ${acc.name}: ${String(e.message).slice(0, 500)}`);
+    await bot.sendMessage(chatId, `${acc.name}: ${String(e.message).slice(0, 500)}`);
   } finally {
     if (session.input) cleanup(session.input);
     if (session.rendered) cleanup(session.rendered);
