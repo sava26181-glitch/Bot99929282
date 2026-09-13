@@ -1,1 +1,3 @@
 SignerPy==0.12.0
+temp-gmail
+curl-cffi
