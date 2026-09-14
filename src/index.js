@@ -1,3 +1,4 @@
+
 const { Telegraf, Markup } = require("telegraf");
 const { chromium } = require("playwright");
 const http = require("http");
@@ -5,24 +6,27 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const { spawn } = require("child_process");
-const WebSocket = require("ws");
 
 const PORT = Number(process.env.PORT || 10000);
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const SESSION_TOKEN = (process.env.SESSION_TOKEN || "").trim();
 
+const DATA_DIR = process.env.DATA_DIR || "/app/data";
+const PROFILE_DIR = path.join(DATA_DIR, "tiktok-profile");
+
+const DISPLAY = ":99";
+const NOVNC_PORT = 6080;
+const VNC_PORT = 5900;
+
 if (!BOT_TOKEN) {
-    console.error("ERROR: TELEGRAM_BOT_TOKEN is not set");
+    console.error("❌ TELEGRAM_BOT_TOKEN is not set");
     process.exit(1);
 }
 
 if (!SESSION_TOKEN) {
-    console.error("ERROR: SESSION_TOKEN is not set");
+    console.error("❌ SESSION_TOKEN is not set");
     process.exit(1);
 }
-
-const DATA_DIR = process.env.DATA_DIR || "/app/data";
-const PROFILE_DIR = path.join(DATA_DIR, "tiktok-profile");
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(PROFILE_DIR, { recursive: true });
@@ -34,58 +38,78 @@ let page = null;
 
 const users = new Map();
 
-function randomId() {
-    return crypto.randomBytes(8).toString("hex");
-}
-
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function safeError(err) {
-    return err && err.message ? err.message : String(err);
+function randomId() {
+    return crypto.randomBytes(16).toString("hex");
 }
 
-/* =========================
-   VIRTUAL DISPLAY
-========================= */
+function errorText(error) {
+    return error?.message || String(error);
+}
 
-function startProcess(command, args, name) {
+/* =========================================================
+   PROCESS MANAGEMENT
+========================================================= */
+
+const processes = [];
+
+function startProcess(command, args, name, options = {}) {
+    console.log(`▶ Starting ${name}: ${command} ${args.join(" ")}`);
+
     const child = spawn(command, args, {
         env: {
             ...process.env,
-            DISPLAY: ":99"
+            DISPLAY
         },
-        stdio: ["ignore", "pipe", "pipe"]
+        stdio: ["ignore", "pipe", "pipe"],
+        ...options
     });
 
-    child.stdout.on("data", data => {
-        console.log(`[${name}] ${data.toString().trim()}`);
-    });
+    processes.push(child);
 
-    child.stderr.on("data", data => {
+    child.stdout?.on("data", data => {
         const text = data.toString().trim();
-        if (text) console.log(`[${name}] ${text}`);
+
+        if (text) {
+            console.log(`[${name}] ${text}`);
+        }
     });
 
-    child.on("error", err => {
-        console.error(`[${name}] failed: ${err.message}`);
+    child.stderr?.on("data", data => {
+        const text = data.toString().trim();
+
+        if (text) {
+            console.log(`[${name}] ${text}`);
+        }
+    });
+
+    child.on("error", error => {
+        console.error(`❌ ${name}: ${error.message}`);
     });
 
     child.on("exit", (code, signal) => {
-        console.log(`[${name}] exited code=${code} signal=${signal || "-"}`);
+        console.log(
+            `ℹ ${name} exited: code=${code}, signal=${signal || "-"}`
+        );
     });
 
     return child;
 }
 
-function startVirtualDisplay() {
-    console.log("Starting virtual display...");
+/* =========================================================
+   VIRTUAL DISPLAY + VNC + NOVNC
+========================================================= */
 
-    const xvfb = startProcess(
+async function startVirtualDisplay() {
+    console.log("🖥 Starting virtual display...");
+
+    startProcess(
         "Xvfb",
         [
-            ":99",
+            DISPLAY,
             "-screen",
             "0",
             "1280x800x24",
@@ -96,47 +120,68 @@ function startVirtualDisplay() {
         "Xvfb"
     );
 
-    setTimeout(() => {
-        startProcess(
-            "fluxbox",
-            [
-                "-display",
-                ":99"
-            ],
-            "Fluxbox"
-        );
-    }, 1500);
+    await sleep(2000);
 
-    setTimeout(() => {
-        startProcess(
-            "x11vnc",
-            [
-                "-display",
-                ":99",
-                "-forever",
-                "-shared",
-                "-rfbport",
-                "5900",
-                "-nopw",
-                "-localhost"
-            ],
-            "x11vnc"
-        );
-    }, 2500);
+    startProcess(
+        "fluxbox",
+        [
+            "-display",
+            DISPLAY
+        ],
+        "Fluxbox"
+    );
 
-    return xvfb;
+    await sleep(1500);
+
+    startProcess(
+        "x11vnc",
+        [
+            "-display",
+            DISPLAY,
+            "-forever",
+            "-shared",
+            "-rfbport",
+            String(VNC_PORT),
+            "-nopw",
+            "-localhost",
+            "-noxdamage"
+        ],
+        "x11vnc"
+    );
+
+    await sleep(1500);
+
+    /*
+     * websockify:
+     *
+     * 6080 -> noVNC web interface
+     *        + WebSocket -> 5900 VNC
+     */
+    startProcess(
+        "websockify",
+        [
+            "--web=/usr/share/novnc",
+            String(NOVNC_PORT),
+            `127.0.0.1:${VNC_PORT}`
+        ],
+        "websockify"
+    );
+
+    await sleep(2000);
+
+    console.log("✅ Virtual display started");
 }
 
-/* =========================
+/* =========================================================
    PLAYWRIGHT
-========================= */
+========================================================= */
 
 async function startBrowser() {
     if (browserContext) {
         return browserContext;
     }
 
-    console.log("Starting Chromium...");
+    console.log("🌐 Starting Chromium...");
 
     browserContext = await chromium.launchPersistentContext(
         PROFILE_DIR,
@@ -148,6 +193,11 @@ async function startBrowser() {
                 height: 800
             },
 
+            screen: {
+                width: 1280,
+                height: 800
+            },
+
             args: [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -155,6 +205,9 @@ async function startBrowser() {
                 "--disable-gpu",
                 "--disable-software-rasterizer",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-features=Translate,OptimizationHints",
+                "--no-first-run",
+                "--no-default-browser-check",
                 "--window-size=1280,800"
             ]
         }
@@ -169,70 +222,49 @@ async function startBrowser() {
     }
 
     page.on("close", () => {
-        if (page) {
-            console.log("TikTok page closed");
+        console.log("ℹ Chromium page closed");
+        page = null;
+    });
+
+    browserContext.on("close", () => {
+        console.log("ℹ Chromium context closed");
+        browserContext = null;
+        page = null;
+    });
+
+    await page.goto(
+        "https://www.tiktok.com/",
+        {
+            waitUntil: "domcontentloaded",
+            timeout: 60000
         }
+    ).catch(error => {
+        console.log(
+            "TikTok initial page:",
+            errorText(error)
+        );
     });
 
-    await page.goto("https://www.tiktok.com/", {
-        waitUntil: "domcontentloaded",
-        timeout: 60000
-    }).catch(err => {
-        console.log("TikTok initial load:", safeError(err));
-    });
-
-    console.log("Chromium started");
+    console.log("✅ Chromium started");
 
     return browserContext;
 }
 
-/* =========================
-   TIKTOK HELPERS
-========================= */
+/* =========================================================
+   TIKTOK
+========================================================= */
 
-async function isLoggedIn() {
-    if (!page) return false;
-
-    try {
-        await page.goto("https://www.tiktok.com/", {
-            waitUntil: "domcontentloaded",
-            timeout: 30000
-        }).catch(() => {});
-
-        await sleep(3000);
-
-        const loginButton = page.getByText(
-            /Log in|Войти/i
-        ).first();
-
-        return !(await loginButton.isVisible().catch(() => false));
-    } catch {
-        return false;
-    }
-}
-
-async function openTikTokProfile() {
+async function openTikTok() {
     if (!page) {
         await startBrowser();
     }
 
-    await page.goto("https://www.tiktok.com/", {
-        waitUntil: "domcontentloaded",
-        timeout: 60000
-    }).catch(() => {});
-
-    await sleep(3000);
-
-    return page;
-}
-
-async function editProfile() {
     if (!page) {
-        await startBrowser();
+        throw new Error("Chromium page is not available");
     }
 
     await page.goto(
-        "https://www.tiktok.com/setting?lang=en",
+        "https://www.tiktok.com/",
         {
             waitUntil: "domcontentloaded",
             timeout: 60000
@@ -240,194 +272,547 @@ async function editProfile() {
     ).catch(() => {});
 
     await sleep(3000);
+
+    return page;
 }
 
-/* =========================
-   REMOTE BROWSER
-========================= */
+async function checkTikTokLogin() {
+    if (!page) {
+        await startBrowser();
+    }
+
+    if (!page) {
+        return false;
+    }
+
+    try {
+        await page.goto(
+            "https://www.tiktok.com/",
+            {
+                waitUntil: "domcontentloaded",
+                timeout: 45000
+            }
+        ).catch(() => {});
+
+        await sleep(3000);
+
+        const loginSelectors = [
+            'a[href*="login"]',
+            'button:has-text("Log in")',
+            'button:has-text("Войти")',
+            'div:has-text("Log in")'
+        ];
+
+        for (const selector of loginSelectors) {
+            const visible = await page
+                .locator(selector)
+                .first()
+                .isVisible()
+                .catch(() => false);
+
+            if (visible) {
+                return false;
+            }
+        }
+
+        /*
+         * Если URL уже содержит профиль/настройки,
+         * это дополнительный признак авторизации.
+         */
+        const currentUrl = page.url();
+
+        if (
+            currentUrl.includes("/login") ||
+            currentUrl.includes("/signup")
+        ) {
+            return false;
+        }
+
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+/* =========================================================
+   BROWSER URL
+========================================================= */
+
+function getExternalHost() {
+    const hostname =
+        process.env.RENDER_EXTERNAL_HOSTNAME ||
+        "";
+
+    if (!hostname) {
+        return null;
+    }
+
+    return hostname;
+}
+
+function getBrowserUrl() {
+    const hostname = getExternalHost();
+
+    if (!hostname) {
+        return null;
+    }
+
+    return (
+        `https://${hostname}/browser?token=` +
+        encodeURIComponent(SESSION_TOKEN)
+    );
+}
+
+/* =========================================================
+   HTML PAGE
+========================================================= */
 
 function browserHtml() {
-    return `
-<!DOCTYPE html>
-<html>
+    const encodedToken =
+        encodeURIComponent(SESSION_TOKEN);
+
+    /*
+     * token передаём и в websocket path,
+     * чтобы внешний endpoint можно было проверить.
+     */
+    const vncPath =
+        `/novnc/websockify?token=${encodedToken}`;
+
+    const vncUrl =
+        `/novnc/vnc.html` +
+        `?autoconnect=true` +
+        `&resize=scale` +
+        `&view_only=false` +
+        `&reconnect=true` +
+        `&reconnect_delay=2000` +
+        `&path=${encodeURIComponent(vncPath)}`;
+
+    return `<!DOCTYPE html>
+<html lang="ru">
 <head>
 <meta charset="UTF-8">
+
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
 <title>TikTok Manager</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+
 <style>
-html,body {
-    margin:0;
-    padding:0;
-    width:100%;
-    height:100%;
-    background:#111;
-    overflow:hidden;
+html,
+body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #111;
 }
 
 iframe {
-    width:100%;
-    height:100%;
-    border:0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    border: 0;
+    background: #111;
 }
 </style>
 </head>
 
 <body>
+
 <iframe
-    src="/novnc/vnc.html?autoconnect=true&resize=scale&path=novnc/websockify"
-    allow="clipboard-read; clipboard-write">
-</iframe>
+    src="${vncUrl}"
+    allow="clipboard-read; clipboard-write"
+></iframe>
+
 </body>
-</html>
-`;
+</html>`;
 }
 
-/* =========================
-   HTTP SERVER
-========================= */
+/* =========================================================
+   TOKEN CHECK
+========================================================= */
 
-const server = http.createServer((req, res) => {
+function tokenFromRequest(req, url) {
+    const queryToken =
+        url.searchParams.get("token");
+
+    const headerToken =
+        req.headers["x-session-token"];
+
+    const authHeader =
+        req.headers.authorization || "";
+
+    let bearerToken = "";
+
+    if (authHeader.startsWith("Bearer ")) {
+        bearerToken =
+            authHeader.slice(7).trim();
+    }
+
+    return (
+        queryToken ||
+        headerToken ||
+        bearerToken ||
+        ""
+    );
+}
+
+function isValidToken(req, url) {
+    const token = tokenFromRequest(req, url);
+
+    return (
+        token.length > 0 &&
+        token === SESSION_TOKEN
+    );
+}
+
+/* =========================================================
+   PROXY HTTP -> NOVNC
+========================================================= */
+
+function proxyHttpToNoVNC(req, res) {
     const url = new URL(
         req.url,
         `http://${req.headers.host}`
     );
 
-    if (url.pathname === "/health") {
-        res.writeHead(200, {
-            "Content-Type": "application/json"
-        });
+    let targetPath =
+        url.pathname.replace(/^\/novnc/, "");
 
-        res.end(
-            JSON.stringify({
-                ok: true,
-                browser: !!browserContext,
-                page: !!page
-            })
-        );
-
-        return;
+    if (!targetPath) {
+        targetPath = "/";
     }
 
-    if (url.pathname === "/browser") {
-        const token = url.searchParams.get("token");
+    /*
+     * Передаём query без нашего внешнего token,
+     * чтобы он не мешал noVNC.
+     */
+    const params = new URLSearchParams();
 
-        if (!token || token !== SESSION_TOKEN) {
-            res.writeHead(403, {
-                "Content-Type": "text/plain"
-            });
-
-            res.end("Forbidden");
-            return;
+    for (const [key, value] of url.searchParams.entries()) {
+        if (key === "token") {
+            continue;
         }
 
-        res.writeHead(200, {
-            "Content-Type": "text/html; charset=utf-8"
-        });
-
-        res.end(browserHtml());
-        return;
+        params.append(key, value);
     }
 
-    if (url.pathname.startsWith("/novnc/")) {
-        const token = url.searchParams.get("token");
+    const query =
+        params.toString();
 
-        if (token && token !== SESSION_TOKEN) {
-            res.writeHead(403);
-            res.end("Forbidden");
-            return;
-        }
-
-        const noVncPath = url.pathname.replace(
-            "/novnc/",
-            "/usr/share/novnc/"
-        );
-
-        if (fs.existsSync(noVncPath)) {
-            res.writeHead(200);
-            fs.createReadStream(noVncPath).pipe(res);
-            return;
-        }
-
-        res.writeHead(404);
-        res.end("Not found");
-        return;
+    if (query) {
+        targetPath += `?${query}`;
     }
 
-    res.writeHead(404);
-    res.end("Not found");
-});
-
-/* =========================
-   WEBSOCKET PROXY
-========================= */
-
-const wss = new WebSocket.Server({
-    noServer: true
-});
-
-server.on("upgrade", (request, socket, head) => {
-    const url = new URL(
-        request.url,
-        `http://${request.headers.host}`
-    );
-
-    if (!url.pathname.startsWith("/novnc/websockify")) {
-        socket.destroy();
-        return;
-    }
-
-    const token =
-        url.searchParams.get("token") ||
-        request.headers["x-session-token"];
-
-    if (token && token !== SESSION_TOKEN) {
-        socket.destroy();
-        return;
-    }
-
-    wss.handleUpgrade(
-        request,
-        socket,
-        head,
-        ws => {
-            const target = new WebSocket(
-                "ws://127.0.0.1:5900"
+    const proxyReq = http.request(
+        {
+            hostname: "127.0.0.1",
+            port: NOVNC_PORT,
+            path: targetPath,
+            method: req.method,
+            headers: {
+                ...req.headers,
+                host: `127.0.0.1:${NOVNC_PORT}`
+            }
+        },
+        proxyRes => {
+            res.writeHead(
+                proxyRes.statusCode || 502,
+                proxyRes.headers
             );
 
-            ws.on("message", message => {
-                if (target.readyState === WebSocket.OPEN) {
-                    target.send(message);
-                }
-            });
-
-            target.on("message", message => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.send(message);
-                }
-            });
-
-            ws.on("close", () => {
-                target.close();
-            });
-
-            target.on("close", () => {
-                ws.close();
-            });
-
-            ws.on("error", () => {
-                target.close();
-            });
-
-            target.on("error", () => {
-                ws.close();
-            });
+            proxyRes.pipe(res);
         }
     );
-});
 
-/* =========================
-   TELEGRAM UI
-========================= */
+    proxyReq.on("error", error => {
+        console.error(
+            "noVNC HTTP proxy error:",
+            error.message
+        );
+
+        if (!res.headersSent) {
+            res.writeHead(502, {
+                "Content-Type": "text/plain; charset=utf-8"
+            });
+        }
+
+        res.end(
+            "noVNC server is not ready"
+        );
+    });
+
+    req.pipe(proxyReq);
+}
+
+/* =========================================================
+   HTTP SERVER
+========================================================= */
+
+const server = http.createServer(
+    (req, res) => {
+        const url = new URL(
+            req.url,
+            `http://${req.headers.host}`
+        );
+
+        /* -------------------------
+           HEALTH
+        ------------------------- */
+
+        if (url.pathname === "/health") {
+            res.writeHead(200, {
+                "Content-Type":
+                    "application/json; charset=utf-8"
+            });
+
+            res.end(
+                JSON.stringify({
+                    ok: true,
+                    browser: !!browserContext,
+                    page: !!page,
+                    novnc: true
+                })
+            );
+
+            return;
+        }
+
+        /* -------------------------
+           BROWSER
+        ------------------------- */
+
+        if (url.pathname === "/browser") {
+            if (!isValidToken(req, url)) {
+                res.writeHead(403, {
+                    "Content-Type":
+                        "text/plain; charset=utf-8"
+                });
+
+                res.end("Forbidden");
+
+                return;
+            }
+
+            res.writeHead(200, {
+                "Content-Type":
+                    "text/html; charset=utf-8",
+                "Cache-Control":
+                    "no-store, no-cache, must-revalidate"
+            });
+
+            res.end(browserHtml());
+
+            return;
+        }
+
+        /* -------------------------
+           NOVNC
+        ------------------------- */
+
+        if (url.pathname.startsWith("/novnc/")) {
+            proxyHttpToNoVNC(req, res);
+            return;
+        }
+
+        /* -------------------------
+           ROOT
+        ------------------------- */
+
+        if (url.pathname === "/") {
+            res.writeHead(200, {
+                "Content-Type":
+                    "text/html; charset=utf-8"
+            });
+
+            res.end(`
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>TikTok Manager</title>
+<style>
+body {
+    margin: 0;
+    background: #111;
+    color: white;
+    font-family: Arial, sans-serif;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+}
+.box {
+    text-align: center;
+}
+a {
+    display: inline-block;
+    margin-top: 20px;
+    padding: 14px 22px;
+    border-radius: 10px;
+    background: #fe2c55;
+    color: white;
+    text-decoration: none;
+}
+</style>
+</head>
+<body>
+<div class="box">
+<h2>🎵 TikTok Manager</h2>
+<p>Бот работает.</p>
+</div>
+</body>
+</html>
+`);
+
+            return;
+        }
+
+        res.writeHead(404, {
+            "Content-Type":
+                "text/plain; charset=utf-8"
+        });
+
+        res.end("Not found");
+    }
+);
+
+/* =========================================================
+   WEBSOCKET PROXY
+========================================================= */
+
+server.on(
+    "upgrade",
+    (req, socket, head) => {
+        const url = new URL(
+            req.url,
+            `http://${req.headers.host}`
+        );
+
+        if (
+            !url.pathname.startsWith(
+                "/novnc/websockify"
+            )
+        ) {
+            socket.destroy();
+            return;
+        }
+
+        if (!isValidToken(req, url)) {
+            console.log(
+                "❌ WebSocket rejected: invalid token"
+            );
+
+            socket.write(
+                "HTTP/1.1 403 Forbidden\r\n" +
+                "Connection: close\r\n" +
+                "\r\n"
+            );
+
+            socket.destroy();
+
+            return;
+        }
+
+        /*
+         * Удаляем внешний /novnc,
+         * websockify ожидает /websockify.
+         */
+        const targetPath =
+            url.pathname.replace(
+                /^\/novnc/,
+                ""
+            ) +
+            (url.search || "");
+
+        const target = require("net").connect(
+            NOVNC_PORT,
+            "127.0.0.1"
+        );
+
+        target.on("connect", () => {
+            let headers =
+                `GET ${targetPath} HTTP/1.1\r\n`;
+
+            headers +=
+                "Host: 127.0.0.1:6080\r\n";
+
+            headers +=
+                "Connection: Upgrade\r\n";
+
+            headers +=
+                "Upgrade: websocket\r\n";
+
+            /*
+             * Передаём WebSocket handshake headers.
+             */
+            for (const [key, value] of Object.entries(
+                req.headers
+            )) {
+                const lower = key.toLowerCase();
+
+                if (
+                    lower === "host" ||
+                    lower === "connection" ||
+                    lower === "upgrade"
+                ) {
+                    continue;
+                }
+
+                if (Array.isArray(value)) {
+                    headers +=
+                        `${key}: ${value.join(", ")}\r\n`;
+                } else if (value != null) {
+                    headers +=
+                        `${key}: ${value}\r\n`;
+                }
+            }
+
+            headers += "\r\n";
+
+            target.write(headers);
+
+            if (head && head.length) {
+                target.write(head);
+            }
+
+            /*
+             * После handshake просто прокидываем
+             * байты в обе стороны.
+             */
+            socket.pipe(target);
+            target.pipe(socket);
+        });
+
+        target.on("error", error => {
+            console.error(
+                "❌ WebSocket proxy error:",
+                error.message
+            );
+
+            socket.destroy();
+        });
+
+        target.on("close", () => {
+            socket.destroy();
+        });
+
+        socket.on("error", () => {
+            target.destroy();
+        });
+
+        socket.on("close", () => {
+            target.destroy();
+        });
+    }
+);
+
+/* =========================================================
+   TELEGRAM KEYBOARD
+========================================================= */
 
 function mainKeyboard() {
     return Markup.inlineKeyboard([
@@ -464,243 +849,388 @@ function mainKeyboard() {
     ]);
 }
 
-/* =========================
-   /START
-========================= */
-
-bot.start(async ctx => {
-    users.set(ctx.from.id, {
-        id: ctx.from.id,
-        session: randomId()
-    });
-
-    await ctx.reply(
-        "🎵 TikTok Manager\n\n" +
-        "Управление твоим TikTok через браузер.\n\n" +
-        "Нажми «Открыть TikTok», чтобы открыть браузер на сервере.",
-        mainKeyboard()
-    );
-});
-
-/* =========================
-   /LOGIN
-========================= */
-
-bot.command("login", async ctx => {
-    await sendBrowserLink(ctx);
-});
-
-/* =========================
-   BROWSER BUTTON
-========================= */
-
-bot.action("open_browser", async ctx => {
-    await ctx.answerCbQuery();
-
-    await sendBrowserLink(ctx);
-});
+/* =========================================================
+   SEND BROWSER LINK
+========================================================= */
 
 async function sendBrowserLink(ctx) {
     try {
         await startBrowser();
 
-        const hostname =
-            process.env.RENDER_EXTERNAL_HOSTNAME;
+        const link = getBrowserUrl();
 
-        if (!hostname) {
+        if (!link) {
             await ctx.reply(
-                "❌ RENDER_EXTERNAL_HOSTNAME не установлен.\n\n" +
-                "На Render он обычно добавляется автоматически."
+                "❌ Render не передал RENDER_EXTERNAL_HOSTNAME.\n\n" +
+                "Проверь, что бот запущен именно на Render."
             );
 
             return;
         }
 
-        const link =
-            `https://${hostname}/browser?token=${encodeURIComponent(SESSION_TOKEN)}`;
-
         await ctx.reply(
-            "🌐 Браузер TikTok запущен.\n\n" +
-            "Открой ссылку ниже и вручную войди в TikTok.\n\n" +
-            "Если TikTok попросит код, CAPTCHA или подтверждение — пройди их вручную.\n\n" +
-            "🔗 " + link
+            "🌐 Браузер TikTok готов.\n\n" +
+            "Открой ссылку ниже:\n\n" +
+            `${link}\n\n` +
+            "После открытия ты увидишь окно Chromium. " +
+            "Войди в TikTok вручную. Если TikTok попросит " +
+            "код, 2FA или CAPTCHA — пройди проверку вручную."
+        );
+    } catch (error) {
+        console.error(
+            "Browser start error:",
+            error
         );
 
-    } catch (err) {
-        console.error(err);
-
         await ctx.reply(
-            "❌ Не удалось запустить браузер:\n" +
-            safeError(err)
+            "❌ Не удалось запустить браузер:\n\n" +
+            errorText(error)
         );
     }
 }
 
-/* =========================
+/* =========================================================
+   /START
+========================================================= */
+
+bot.start(async ctx => {
+    users.set(
+        ctx.from.id,
+        {
+            id: ctx.from.id,
+            session: randomId()
+        }
+    );
+
+    await ctx.reply(
+        "🎵 TikTok Manager\n\n" +
+        "Управление TikTok через браузер на сервере.\n\n" +
+        "Нажми кнопку ниже.",
+        mainKeyboard()
+    );
+});
+
+/* =========================================================
+   /LOGIN
+========================================================= */
+
+bot.command(
+    "login",
+    async ctx => {
+        await sendBrowserLink(ctx);
+    }
+);
+
+/* =========================================================
+   OPEN BROWSER
+========================================================= */
+
+bot.action(
+    "open_browser",
+    async ctx => {
+        await ctx.answerCbQuery().catch(() => {});
+
+        await sendBrowserLink(ctx);
+    }
+);
+
+/* =========================================================
    CHECK LOGIN
-========================= */
+========================================================= */
 
-bot.action("check_login", async ctx => {
-    await ctx.answerCbQuery();
+bot.action(
+    "check_login",
+    async ctx => {
+        await ctx.answerCbQuery().catch(() => {});
 
-    try {
-        const logged = await isLoggedIn();
+        try {
+            const logged =
+                await checkTikTokLogin();
 
-        if (logged) {
+            if (logged) {
+                await ctx.reply(
+                    "✅ Похоже, ты вошёл в TikTok.",
+                    mainKeyboard()
+                );
+            } else {
+                await ctx.reply(
+                    "❌ Вход не обнаружен.\n\n" +
+                    "Открой браузер и войди в TikTok вручную.",
+                    mainKeyboard()
+                );
+            }
+        } catch (error) {
             await ctx.reply(
-                "✅ Похоже, ты вошёл в TikTok.",
-                mainKeyboard()
-            );
-        } else {
-            await ctx.reply(
-                "❌ Вход не обнаружен.\n\n" +
-                "Открой браузер через кнопку и войди вручную.",
-                mainKeyboard()
+                "❌ Ошибка проверки:\n\n" +
+                errorText(error)
             );
         }
-    } catch (err) {
-        await ctx.reply(
-            "❌ Ошибка проверки:\n" +
-            safeError(err)
-        );
     }
-});
+);
 
-/* =========================
+/* =========================================================
    PROFILE
-========================= */
+========================================================= */
 
-bot.action("profile", async ctx => {
-    await ctx.answerCbQuery();
+bot.action(
+    "profile",
+    async ctx => {
+        await ctx.answerCbQuery().catch(() => {});
 
-    try {
-        await openTikTokProfile();
+        try {
+            await openTikTok();
 
-        await ctx.reply(
-            "👤 Профиль TikTok открыт в браузере.\n\n" +
-            "Для изменения данных используй «Редактировать профиль».",
-            mainKeyboard()
-        );
-    } catch (err) {
-        await ctx.reply(
-            "❌ Ошибка:\n" +
-            safeError(err)
-        );
+            await ctx.reply(
+                "👤 TikTok открыт в браузере.\n\n" +
+                "Используй браузер для просмотра профиля.",
+                mainKeyboard()
+            );
+        } catch (error) {
+            await ctx.reply(
+                "❌ Не удалось открыть TikTok:\n\n" +
+                errorText(error)
+            );
+        }
     }
-});
+);
 
-/* =========================
+/* =========================================================
    EDIT PROFILE
-========================= */
+========================================================= */
 
-bot.action("edit_profile", async ctx => {
-    await ctx.answerCbQuery();
+bot.action(
+    "edit_profile",
+    async ctx => {
+        await ctx.answerCbQuery().catch(() => {});
 
-    try {
-        await editProfile();
+        try {
+            if (!page) {
+                await startBrowser();
+            }
 
-        await ctx.reply(
-            "✏️ Открыл настройки профиля TikTok.\n\n" +
-            "Изменения можно выполнить непосредственно в открытом браузере."
-        );
-    } catch (err) {
-        await ctx.reply(
-            "❌ Не удалось открыть редактирование профиля:\n" +
-            safeError(err)
-        );
+            await page.goto(
+                "https://www.tiktok.com/setting",
+                {
+                    waitUntil: "domcontentloaded",
+                    timeout: 60000
+                }
+            ).catch(() => {});
+
+            await sleep(3000);
+
+            await ctx.reply(
+                "✏️ Открыл страницу настроек TikTok.\n\n" +
+                "Измени аватар, имя, описание и другие данные " +
+                "непосредственно в открытом окне браузера."
+            );
+        } catch (error) {
+            await ctx.reply(
+                "❌ Не удалось открыть настройки:\n\n" +
+                errorText(error)
+            );
+        }
     }
-});
+);
 
-/* =========================
+/* =========================================================
    LOGOUT
-========================= */
+========================================================= */
 
-bot.action("logout", async ctx => {
-    await ctx.answerCbQuery();
+bot.action(
+    "logout",
+    async ctx => {
+        await ctx.answerCbQuery().catch(() => {});
 
-    try {
-        if (page) {
+        try {
+            if (!page) {
+                await startBrowser();
+            }
+
             await page.goto(
                 "https://www.tiktok.com/",
                 {
                     waitUntil: "domcontentloaded",
-                    timeout: 30000
+                    timeout: 45000
                 }
             ).catch(() => {});
 
-            await sleep(1000);
+            await ctx.reply(
+                "🚪 Для выхода из TikTok используй кнопку выхода " +
+                "в самом TikTok через открытый браузер."
+            );
+        } catch (error) {
+            await ctx.reply(
+                "❌ Ошибка:\n\n" +
+                errorText(error)
+            );
         }
-
-        await ctx.reply(
-            "🚪 Для полного выхода из TikTok открой браузер и используй кнопку Log out в настройках TikTok."
-        );
-    } catch (err) {
-        await ctx.reply(
-            "❌ Ошибка:\n" +
-            safeError(err)
-        );
     }
-});
+);
 
-/* =========================
-   ERROR HANDLER
-========================= */
+/* =========================================================
+   TELEGRAM ERROR
+========================================================= */
 
-bot.catch((err, ctx) => {
-    console.error(
-        "Telegram bot error:",
-        err
+bot.catch(
+    async (error, ctx) => {
+        console.error(
+            "Telegram bot error:",
+            error
+        );
+
+        try {
+            await ctx.reply(
+                "❌ Произошла ошибка бота."
+            );
+        } catch {}
+    }
+);
+
+/* =========================================================
+   GRACEFUL SHUTDOWN
+========================================================= */
+
+async function shutdown(signal) {
+    console.log(
+        `\nReceived ${signal}. Shutting down...`
     );
 
-    ctx.reply(
-        "❌ Произошла ошибка бота."
-    ).catch(() => {});
-});
+    try {
+        bot.stop(signal);
+    } catch {}
 
-/* =========================
-   START
-========================= */
+    try {
+        if (browserContext) {
+            await browserContext.close();
+        }
+    } catch {}
 
-async function main() {
-    console.log("Starting Zenodrop/TikTok Manager...");
+    for (const child of processes) {
+        try {
+            child.kill("SIGTERM");
+        } catch {}
+    }
 
-    startVirtualDisplay();
+    try {
+        server.close();
+    } catch {}
 
-    await sleep(4000);
-
-    await startBrowser();
-
-    server.listen(PORT, "0.0.0.0", () => {
-        console.log(
-            `HTTP server running on ${PORT}`
-        );
-
-        console.log(
-            "PUBLIC URL:",
-            process.env.RENDER_EXTERNAL_URL ||
-            process.env.RENDER_EXTERNAL_HOSTNAME ||
-            "(not set)"
-        );
-    });
-
-    await bot.launch();
-
-    console.log("Telegram bot started");
+    process.exit(0);
 }
 
-main().catch(err => {
+process.once(
+    "SIGINT",
+    () => shutdown("SIGINT")
+);
+
+process.once(
+    "SIGTERM",
+    () => shutdown("SIGTERM")
+);
+
+/* =========================================================
+   START
+========================================================= */
+
+async function main() {
+    console.log("=================================");
+    console.log("🎵 TikTok Manager");
+    console.log("=================================");
+
+    console.log("PORT:", PORT);
+    console.log("DISPLAY:", DISPLAY);
+    console.log("DATA_DIR:", DATA_DIR);
+    console.log("PROFILE_DIR:", PROFILE_DIR);
+    console.log(
+        "RENDER_EXTERNAL_HOSTNAME:",
+        process.env.RENDER_EXTERNAL_HOSTNAME ||
+        "(not set)"
+    );
+
+    /*
+     * Сначала запускаем HTTP,
+     * чтобы Render увидел открытый порт.
+     */
+    server.listen(
+        PORT,
+        "0.0.0.0",
+        () => {
+            console.log(
+                `✅ HTTP server listening on ${PORT}`
+            );
+        }
+    );
+
+    /*
+     * Затем графическая среда.
+     */
+    await startVirtualDisplay();
+
+    /*
+     * Затем Chromium.
+     */
+    await startBrowser();
+
+    /*
+     * Telegram polling.
+     */
+    console.log("🤖 Starting Telegram bot...");
+
+    try {
+        await bot.launch();
+
+        console.log(
+            "✅ Telegram bot started successfully"
+        );
+    } catch (error) {
+        console.error(
+            "❌ Bot failed to start:",
+            error
+        );
+
+        /*
+         * Важно:
+         * 409 означает, что другой процесс использует
+         * тот же Telegram bot token.
+         */
+        if (
+            String(error).includes("409") ||
+            String(error).includes(
+                "terminated by other getUpdates request"
+            )
+        ) {
+            console.error("");
+            console.error(
+                "============================================"
+            );
+            console.error(
+                "❌ TELEGRAM 409 CONFLICT"
+            );
+            console.error(
+                "Другой экземпляр этого бота уже запущен."
+            );
+            console.error(
+                "Останови старый экземпляр бота."
+            );
+            console.error(
+                "============================================"
+            );
+        }
+
+        /*
+         * Не закрываем HTTP сразу,
+         * чтобы можно было открыть /health
+         * и посмотреть состояние сервиса.
+         */
+        return;
+    }
+}
+
+main().catch(error => {
     console.error(
-        "FATAL ERROR:",
-        err
+        "❌ FATAL ERROR:",
+        error
     );
 
     process.exit(1);
-});
-
-process.once("SIGINT", () => {
-    bot.stop("SIGINT");
-});
-
-process.once("SIGTERM", () => {
-    bot.stop("SIGTERM");
 });
