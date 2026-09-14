@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: tiktok-manager
+    runtime: node
+    buildCommand: npm install && npx playwright install --with-deps chromium
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: HEADLESS
+        value: "true"
+      - key: PORT
+        value: "10000"
+      - key: BOT_TOKEN
+        sync: false
+      - key: ADMIN_ID
+        sync: false
+      - key: PUBLIC_URL
+        sync: false
+    disk:
+      name: tiktok-data
+      mountPath: /opt/render/project/src/data
+      sizeGB: 1
