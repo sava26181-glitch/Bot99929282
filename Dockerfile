@@ -2,9 +2,21 @@ FROM node:20-bookworm-slim
 
 ENV NODE_ENV=production
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV DISPLAY=:99
 ENV PORT=10000
 
 WORKDIR /app
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       xvfb \
+       fluxbox \
+       x11vnc \
+       novnc \
+       websockify \
+       ca-certificates \
+       fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
 
